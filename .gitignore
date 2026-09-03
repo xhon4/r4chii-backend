@@ -1,0 +1,9 @@
+/target
+.env
+.sqlx/
+/client-dist
+
+# Documentation stays local-only, never pushed to this repo.
+*.md
+/docs/
+/spikes/

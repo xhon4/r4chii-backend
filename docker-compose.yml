@@ -1,0 +1,172 @@
+# Pinned so the project name never comes from the directory name. Without
+# this, moving the backend into backend/ would silently switch the project
+# from "discord-alt-docs" to "backend" — and a new project means a new
+# postgres-data volume, i.e. an empty database that looks like data loss.
+name: r4chii
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # Restarts with the daemon. Without a policy the whole stack stays down
+    # after a host reboot until someone notices and runs `up -d` by hand, and
+    # nothing here is watched closely enough for that to be a short outage.
+    restart: unless-stopped
+    ports:
+      # Bound to the loopback interface, not to every interface. The host has
+      # no firewall and sits on both a LAN and a tailnet, so "5432:5432"
+      # published the database to every one of them behind nothing but
+      # POSTGRES_PASSWORD. Nothing off-host needs this port: the server reaches
+      # postgres over the compose network by service name, and psql runs here.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?set POSTGRES_USER in .env}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Object storage for profile images. Pinned to an exact tag, not
+  # :latest — the storage engine is the one service where an unnoticed version
+  # jump can make existing data unreadable.
+  garage:
+    image: dxflrs/garage:v2.3.0
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?set GARAGE_RPC_SECRET in .env}
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN:?set GARAGE_ADMIN_TOKEN in .env}
+    volumes:
+      - ./garage/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    restart: unless-stopped
+    ports:
+      # S3 API only. The admin API (3903) stays on the compose network — it
+      # can create buckets and keys, so it has no business being reachable
+      # from the host.
+      #
+      # Loopback for the same reason as postgres above: the S3 API carries the
+      # access key the server uses, and the host publishes to a LAN and a
+      # tailnet with no firewall in front. Browsers do NOT come through here —
+      # they use S3_PUBLIC_ENDPOINT, which is a separate published origin.
+      - "127.0.0.1:3900:3900"
+    healthcheck:
+      # `garage status` talks to the node over RPC, so a pass means the node
+      # is actually up and answering, not merely that the process started.
+      # It does NOT mean a layout has been applied — see scripts/bootstrap-garage.sh.
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Catches every outgoing mail instead of delivering it, and shows it in a web
+  # UI on :8025. Development only — it is how the verification flow gets
+  # exercised without a provider account, a domain, or the risk of mailing a
+  # real stranger from a test run. Deliberately has no volume: a mailbox that
+  # survives a restart is a mailbox someone will mistake for production.
+  mailpit:
+    image: axllent/mailpit:v1.31.0
+    restart: unless-stopped
+    ports:
+      # Loopback, and this one is the sharpest of the four. Mailpit's web UI
+      # authenticates nobody and shows the full body of every mail the server
+      # sends — which in a deployment that has NOT overridden SMTP_HOST means
+      # the registration and password-reset links for every account. Published
+      # on a firewall-less host, that is account takeover for anyone on the
+      # LAN or the tailnet. This deployment does override SMTP_HOST, so the
+      # box was not full of live links, but the exposure should never have
+      # depended on that.
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      garage:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:?set POSTGRES_DB in .env}
+      BIND_ADDR: 0.0.0.0:8080
+      CLIENT_DIST_DIR: /app/client-dist
+      # Defaults point at Mailpit, which speaks plain SMTP and authenticates
+      # nobody — the whole point in dev, where an unconfigured checkout still
+      # has to boot and exercise the verification flow end to end. A real
+      # deployment overrides every one of them from .env; hardcoding them here
+      # meant provider credentials in .env were read and then ignored, and the
+      # mail went to Mailpit no matter what.
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: "${SMTP_PORT:-1025}"
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_SECURITY: ${SMTP_SECURITY:-none}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@r4chii.localhost}
+      # Object storage, used for avatars and now export downloads.
+      # `endpoint` is how THIS container reaches Garage — always
+      # the compose service name, never from .env, same reasoning
+      # DATABASE_URL's `postgres:5432` host is hardcoded below rather than
+      # sourced. `public_endpoint` is how a BROWSER reaches it and is
+      # deployment-specific (the Funnel origin), so it comes
+      # from .env like every other real secret here. Key/secret are minted by
+      # scripts/bootstrap-garage.sh and can only be read from .env, never
+      # invented. Bucket defaults to bootstrap-garage.sh's own default so an
+      # unconfigured checkout doesn't need one more .env line.
+      S3_ENDPOINT: http://garage:3900
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:?set S3_PUBLIC_ENDPOINT in .env — the Garage Funnel origin a browser can reach}
+      S3_BUCKET: ${S3_BUCKET:-r4chii-media}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env — see scripts/bootstrap-garage.sh}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env — see scripts/bootstrap-garage.sh}
+      # Voice relay. This block enumerates every variable the server gets —
+      # there is no env_file — so a TURN setting that is only in .env
+      # reaches nothing, and the relay would be silently absent in production
+      # while working in every local test. That is exactly the failure to
+      # avoid: no relay does not look like a missing setting, it looks
+      # like one person in a four-way call that nobody can hear.
+      #
+      # Cloudflare Realtime TURN, the preferred tier. Both are needed or
+      # neither is used.
+      CLOUDFLARE_TURN_KEY_ID: ${CLOUDFLARE_TURN_KEY_ID:-}
+      CLOUDFLARE_TURN_API_TOKEN: ${CLOUDFLARE_TURN_API_TOKEN:-}
+      # A self-hosted TURN (coturn or similar), used when Cloudflare is not
+      # configured. All three or none: half a TURN is worse than no TURN,
+      # because the browser fails during ICE instead of falling back.
+      TURN_URL: ${TURN_URL:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_CREDENTIAL: ${TURN_CREDENTIAL:-}
+      # Overrides the public STUN default. Empty is a real, supported answer.
+      STUN_URL: ${STUN_URL:-}
+      # Empty defaults, never `:?`, unlike the storage lines above. An
+      # unconfigured checkout has to keep booting: voice without a relay still
+      # works on cooperative NAT and reports `has_relay: false` so the client
+      # can say so, which is why `configured()` treats empty as unset.
+    restart: unless-stopped
+    ports:
+      # Loopback, because Cloudflare Tunnel is the only intended way in and
+      # `cloudflared` reaches it from this host (/etc/cloudflared/config.yml
+      # routes r4chii.com to http://127.0.0.1:8080). Published on every
+      # interface, the app was also reachable directly on the LAN and the
+      # tailnet — which bypasses the tunnel and everything Cloudflare does in
+      # front of it, and contradicts the "no open ports" the deployment docs
+      # claim. BIND_ADDR stays 0.0.0.0:8080: that is the bind INSIDE the
+      # container, and it has to accept the connection docker forwards.
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  postgres-data:
+  # Split the way Garage itself splits them: meta/ is a sqlite database of
+  # small random writes, data/ is immutable content-addressed blocks. Keeping
+  # them apart means they can later live on different disks without a
+  # migration.
+  garage-meta:
+  garage-data:

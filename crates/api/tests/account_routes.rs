@@ -1,0 +1,499 @@
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use axum::{
+    body::Body,
+    extract::ConnectInfo,
+    http::{header, Method, Request, StatusCode},
+};
+use http_body_util::BodyExt;
+use serde_json::{json, Value};
+use testcontainers_modules::{
+    postgres::Postgres,
+    testcontainers::{runners::AsyncRunner, ImageExt},
+};
+use tower::ServiceExt;
+
+async fn test_app() -> (
+    axum::Router,
+    mailer::CaptureMailer,
+    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+) {
+    let container = Postgres::default()
+        // postgres:16, the tag production runs (docker-compose.yml).
+        // The crate default is 11-alpine: five majors and a different
+        // libc away from the database this schema is deployed on.
+        .with_tag("16")
+        .start()
+        .await
+        .expect("postgres container starts");
+
+    let host = container.get_host().await.expect("container host");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("container port");
+    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+
+    let pool = db::build_pool(&database_url)
+        .await
+        .expect("pool connects");
+    db::run_migrations(&pool).await.expect("migrations run");
+
+    let mail = mailer::CaptureMailer::new();
+    let domain = domain::DomainService::new(pool.clone());
+    let state = api::AppState {
+        auth: auth::AuthService::new(pool, std::sync::Arc::new(mail.clone())),
+        domain: domain.clone(),
+        realtime: realtime::Hub::new(domain),
+    };
+
+    (api::router(state), mail, container)
+}
+
+// Same rationale as crates/api/tests/auth_routes.rs: the register/login
+// routes sit behind tower-governor and need a distinct fake peer per call to
+// avoid tripping the burst limit under `oneshot`.
+static NEXT_IP_OCTETS: AtomicU32 = AtomicU32::new(1);
+
+fn next_peer_addr() -> SocketAddr {
+    let n = NEXT_IP_OCTETS.fetch_add(1, Ordering::Relaxed);
+    let ip = Ipv4Addr::new(10, (n >> 16) as u8, (n >> 8) as u8, n as u8);
+    SocketAddr::new(IpAddr::V4(ip), 0)
+}
+
+fn request(method: Method, uri: &str) -> http::request::Builder {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .extension(ConnectInfo(next_peer_addr()))
+}
+
+fn json_request(method: Method, uri: &str, body: Value) -> Request<Body> {
+    request(method, uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request builds")
+}
+
+fn auth_json_request(method: Method, uri: &str, token: &str, body: Value) -> Request<Body> {
+    request(method, uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(body.to_string()))
+        .expect("request builds")
+}
+
+fn auth_request(method: Method, uri: &str, token: &str) -> Request<Body> {
+    request(method, uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request builds")
+}
+
+async fn body_json(response: axum::response::Response) -> Value {
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body collects")
+        .to_bytes();
+    serde_json::from_slice(&bytes).expect("body is valid JSON")
+}
+
+fn register_body(email: &str, username: &str) -> Value {
+    json!({
+        "email": email,
+        "username": username,
+        "password": "correct horse battery staple",
+        "display_name": "Test User",
+    })
+}
+
+fn login_body(email: &str) -> Value {
+    json!({
+        "email": email,
+        "password": "correct horse battery staple",
+    })
+}
+
+/// Registers, verifies, and logs in, returning (account_id, bearer_token).
+///
+/// Goes through the real HTTP flow rather than creating the account directly,
+/// so a break in registration surfaces here too instead of only in
+/// auth_routes.rs.
+async fn register_and_login(
+    app: &axum::Router,
+    mail: &mailer::CaptureMailer,
+    email: &str,
+    username: &str,
+) -> (String, String) {
+    let start = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/registrations",
+            register_body(email, username),
+        ))
+        .await
+        .expect("registration request succeeds");
+    assert_eq!(start.status(), StatusCode::ACCEPTED);
+
+    let code = mail
+        .last()
+        .expect("a verification mail was sent")
+        .body
+        .split_whitespace()
+        .find(|word| word.len() == 8 && word.chars().all(|c| c.is_ascii_digit()))
+        .expect("the mail carries an 8-digit code")
+        .to_string();
+
+    let verify_response = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/accounts",
+            json!({ "email": email, "code": code }),
+        ))
+        .await
+        .expect("verification request succeeds");
+    assert_eq!(verify_response.status(), StatusCode::CREATED);
+    let account_body = body_json(verify_response).await;
+    let account_id = account_body["id"]
+        .as_str()
+        .expect("account id present")
+        .to_string();
+
+    let login_response = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/sessions",
+            login_body(email),
+        ))
+        .await
+        .expect("login request succeeds");
+    let login_body = body_json(login_response).await;
+    let token = login_body["token"]
+        .as_str()
+        .expect("token present")
+        .to_string();
+
+    (account_id, token)
+}
+
+#[tokio::test]
+async fn viewing_another_accounts_public_profile_never_includes_email() {
+    let (app, mail, _container) = test_app().await;
+
+    let (alice_id, _alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (_bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    let response = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{alice_id}"),
+            &bob_token,
+        ))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["username"], "alice");
+    assert!(
+        body.get("email").is_none(),
+        "public profile must never include email"
+    );
+}
+
+#[tokio::test]
+async fn get_own_account_returns_the_self_shape_including_email() {
+    let (app, mail, _container) = test_app().await;
+
+    let (_carol_id, carol_token) =
+        register_and_login(&app, &mail, "carol@example.com", "carol").await;
+
+    let response = app
+        .oneshot(auth_request(Method::GET, "/api/v1/accounts/me", &carol_token))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["username"], "carol");
+    assert_eq!(body["email"], "carol@example.com");
+}
+
+#[tokio::test]
+async fn get_account_for_a_nonexistent_id_returns_404() {
+    let (app, mail, _container) = test_app().await;
+
+    let (_dave_id, dave_token) = register_and_login(&app, &mail, "dave@example.com", "dave").await;
+
+    let response = app
+        .oneshot(auth_request(
+            Method::GET,
+            "/api/v1/accounts/018f3b2a-0000-7000-8000-000000000000",
+            &dave_token,
+        ))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = body_json(response).await;
+    assert_eq!(body["error"]["code"], "account_not_found");
+}
+
+#[tokio::test]
+async fn patch_accounts_me_updates_only_the_calling_account() {
+    let (app, mail, _container) = test_app().await;
+
+    let (_erin_id, erin_token) = register_and_login(&app, &mail, "erin@example.com", "erin").await;
+    let (frank_id, frank_token) = register_and_login(&app, &mail, "frank@example.com", "frank").await;
+
+    let response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &erin_token,
+            json!({ "display_name": "Erin Updated" }),
+        ))
+        .await
+        .expect("patch request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["display_name"], "Erin Updated");
+    assert_eq!(body["username"], "erin");
+
+    // frank's own profile is untouched.
+    let frank_response = app
+        .clone()
+        .oneshot(auth_request(Method::GET, "/api/v1/accounts/me", &frank_token))
+        .await
+        .expect("request succeeds");
+    let frank_body = body_json(frank_response).await;
+    assert_eq!(frank_body["display_name"], "Test User");
+
+    // frank's public profile (fetched via the id another account would use)
+    // is also untouched.
+    let frank_public_response = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{frank_id}"),
+            &frank_token,
+        ))
+        .await
+        .expect("request succeeds");
+    let frank_public_body = body_json(frank_public_response).await;
+    assert_eq!(frank_public_body["display_name"], "Test User");
+}
+
+#[tokio::test]
+async fn patch_accounts_me_updating_one_field_leaves_the_others_unchanged() {
+    let (app, mail, _container) = test_app().await;
+
+    let (_grace_id, grace_token) =
+        register_and_login(&app, &mail, "grace@example.com", "grace").await;
+
+    let response = app
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &grace_token,
+            json!({ "display_name": "Grace Updated" }),
+        ))
+        .await
+        .expect("patch request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["display_name"], "Grace Updated");
+    assert_eq!(body["username"], "grace");
+    assert!(body["avatar_url"].is_null());
+}
+
+#[tokio::test]
+async fn patch_accounts_me_to_a_taken_username_returns_409_and_leaves_the_caller_unmodified() {
+    let (app, mail, _container) = test_app().await;
+
+    let (_heidi_id, _heidi_token) =
+        register_and_login(&app, &mail, "heidi@example.com", "heidi").await;
+    let (_ivan_id, ivan_token) = register_and_login(&app, &mail, "ivan@example.com", "ivan").await;
+
+    let response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &ivan_token,
+            json!({ "username": "heidi" }),
+        ))
+        .await
+        .expect("patch request succeeds");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = body_json(response).await;
+    assert_eq!(body["error"]["code"], "username_taken");
+
+    // ivan's own row must be untouched by the failed update.
+    let ivan_response = app
+        .oneshot(auth_request(Method::GET, "/api/v1/accounts/me", &ivan_token))
+        .await
+        .expect("request succeeds");
+    let ivan_body = body_json(ivan_response).await;
+    assert_eq!(ivan_body["username"], "ivan");
+}
+
+#[tokio::test]
+async fn get_accounts_id_with_no_token_returns_401() {
+    let (app, mail, _container) = test_app().await;
+
+    let (someone_id, _token) = register_and_login(&app, &mail, "jack@example.com", "jack").await;
+
+    let response = app
+        .oneshot(request(
+            Method::GET,
+            &format!("/api/v1/accounts/{someone_id}"),
+        )
+        .body(Body::empty())
+        .expect("request builds"))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn patch_accounts_me_with_no_token_returns_401() {
+    let (app, _mail, _container) = test_app().await;
+
+    let response = app
+        .oneshot(json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            json!({ "display_name": "Nope" }),
+        ))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The single behaviour `double_option` in `dto.rs` exists for, exercised
+/// through real JSON rather than a hand-built `UpdateAccountInput`.
+///
+/// A plain `Option<String>` would pass every other test in this file and
+/// still fail here: serde collapses an absent key and an explicit `null`
+/// into the same `None`, so a bio could be set and never removed.
+#[tokio::test]
+async fn patch_accounts_me_tells_an_absent_field_apart_from_an_explicit_null() {
+    let (app, mail, _container) = test_app().await;
+
+    let (_heidi_id, heidi_token) = register_and_login(&app, &mail, "heidi@example.com", "heidi").await;
+
+    // Seed the two nullable fields this test then treats differently.
+    let seed_response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &heidi_token,
+            json!({ "bio": "escribo de noche", "pronouns": "she/her" }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(seed_response.status(), StatusCode::OK);
+    let seeded = body_json(seed_response).await;
+    assert_eq!(seeded["bio"], "escribo de noche");
+    assert_eq!(seeded["pronouns"], "she/her");
+
+    // Absent keys: both fields survive a patch that never mentions them.
+    let absent_response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &heidi_token,
+            json!({ "display_name": "Heidi" }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(absent_response.status(), StatusCode::OK);
+    let after_absent = body_json(absent_response).await;
+    assert_eq!(after_absent["display_name"], "Heidi");
+    assert_eq!(after_absent["bio"], "escribo de noche");
+    assert_eq!(after_absent["pronouns"], "she/her");
+
+    // Explicit null clears `bio` only — `pronouns` is absent this time and
+    // must not be dragged along.
+    let null_response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &heidi_token,
+            json!({ "bio": null }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(null_response.status(), StatusCode::OK);
+    let after_null = body_json(null_response).await;
+    assert!(after_null["bio"].is_null());
+    assert_eq!(after_null["pronouns"], "she/her");
+
+    // And it is the stored row that changed, not just the response body.
+    let reread_response = app
+        .oneshot(auth_request(Method::GET, "/api/v1/accounts/me", &heidi_token))
+        .await
+        .expect("request succeeds");
+    let reread = body_json(reread_response).await;
+    assert!(reread["bio"].is_null());
+    assert_eq!(reread["pronouns"], "she/her");
+}
+
+#[tokio::test]
+async fn patch_accounts_me_rejects_an_invalid_accent_color_and_writes_nothing() {
+    let (app, mail, _container) = test_app().await;
+
+    let (_ivan_id, ivan_token) = register_and_login(&app, &mail, "ivan@example.com", "ivan").await;
+
+    let seed_response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &ivan_token,
+            json!({ "accent_color": "#AABBCC" }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(seed_response.status(), StatusCode::OK);
+
+    // `red` is a colour, but not the `#RRGGBB` shape the column accepts.
+    // The service rejects it before writing, so the earlier value stands.
+    let rejected_response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &ivan_token,
+            json!({ "accent_color": "red", "display_name": "Ivan Updated" }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(rejected_response.status(), StatusCode::BAD_REQUEST);
+
+    let reread_response = app
+        .oneshot(auth_request(Method::GET, "/api/v1/accounts/me", &ivan_token))
+        .await
+        .expect("request succeeds");
+    let reread = body_json(reread_response).await;
+    assert_eq!(reread["accent_color"], "#AABBCC");
+    // The valid field that travelled alongside the invalid one is not
+    // partially applied either.
+    assert_eq!(reread["display_name"], "Test User");
+}

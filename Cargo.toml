@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/db",
+    "crates/storage",
+    "crates/mailer",
+    "crates/auth",
+    "crates/domain",
+    "crates/realtime",
+    "crates/api",
+    "crates/server",
+]
+
+[workspace.package]
+edition = "2021"
+publish = false

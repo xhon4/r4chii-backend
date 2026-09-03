@@ -1,0 +1,35 @@
+[package]
+name = "auth"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+app-core = { version = "0.1.0", path = "../core" }
+argon2 = { version = "0.5.3", features = ["password-hash", "std"] }
+chrono = { version = "0.4.45", features = ["serde", "clock"] }
+db = { version = "0.1.0", path = "../db" }
+mailer = { version = "0.1.0", path = "../mailer" }
+rand = "0.10.2"
+sha2 = "0.11.0"
+subtle = "2.6.1"
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }
+thiserror = "2.0.20"
+
+[features]
+# Exposes `AuthService::create_verified_account`, which builds an account
+# without the email round-trip. Other crates' integration tests need accounts
+# to exist but have nothing to say about verification, and making every one of
+# them simulate a mail flow would couple them to auth's internals for no
+# coverage. Never enabled by the server binary.
+test-support = []
+
+[dev-dependencies]
+# Self dev-dependency so this crate's own integration tests can reach the
+# feature-gated direct-account helper. Profile tests need accounts to exist and
+# have nothing to say about the mail round-trip.
+auth = { path = ".", features = ["test-support"] }
+app-core = { version = "0.1.0", path = "../core" }
+mailer = { version = "0.1.0", path = "../mailer" }
+testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }

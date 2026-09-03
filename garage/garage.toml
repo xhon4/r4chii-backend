@@ -1,0 +1,40 @@
+# Garage object storage — single-node development configuration.
+#
+# Deliberately contains NO secrets. rpc_secret, admin_token and metrics_token
+# are supplied through GARAGE_RPC_SECRET / GARAGE_ADMIN_TOKEN /
+# GARAGE_METRICS_TOKEN, which docker-compose reads from .env — the same rule
+# that took the Postgres credentials out of docker-compose.yml. This file is
+# committed; a secret written here would be committed with it.
+#
+# Replaces MinIO: MinIO's vendor archived its own open-source server, and
+# Garage speaks the same S3 API without that risk.
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+
+# sqlite rather than lmdb: one node, modest hardware, and a metadata engine
+# that survives being copied around like any other file.
+db_engine = "sqlite"
+
+# One node stores one copy. Garage's own docs call this the "no replication"
+# mode — correct here, and NOT what a multi-machine deployment should use.
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+# Resolves over the compose network. A single node still opens an RPC
+# connection to itself, so this has to be an address that actually resolves
+# from inside the container, not 127.0.0.1.
+rpc_public_addr = "garage:3901"
+
+[s3_api]
+# Garage has no real regions; this string only has to match what the client
+# signs with. `storage` reads it from S3_REGION so the two cannot drift.
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+# Enables virtual-host-style addressing (bucket.s3.garage.localhost). We use
+# path-style instead — it needs no DNS and survives the bucket name changing
+# — but leaving this set costs nothing and keeps the option open.
+root_domain = ".s3.garage.localhost"
+
+[admin]
+api_bind_addr = "[::]:3903"

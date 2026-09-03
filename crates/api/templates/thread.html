@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} · r4chii</title>
+<link rel="canonical" href="{{ canonical_url }}">
+<meta name="robots" content="index, follow">
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #1a1a1a; background: #fff; }
+  .banner { background: #f4f4f4; padding: 0.75rem 1rem; margin-bottom: 2rem; border-radius: 6px; font-size: 0.9rem; }
+  h1 { font-size: 1.5rem; }
+  .message { margin-bottom: 1.5rem; border-left: 3px solid #eee; padding-left: 1rem; }
+  .message .meta { font-size: 0.85rem; color: #666; margin-bottom: 0.25rem; }
+  .message .content { white-space: pre-wrap; word-wrap: break-word; }
+  .pager { margin-top: 2rem; }
+  a { color: #2b6cb0; }
+</style>
+</head>
+<body>
+<div class="banner">Read-only archive view — <a href="/">open r4chii to reply</a></div>
+<h1>{{ title }}</h1>
+{% for message in messages %}
+<div class="message">
+  <div class="meta"><strong>{{ message.author_display_name }}</strong> · <time datetime="{{ message.created_at_iso }}">{{ message.created_at_display }}</time></div>
+  <div class="content">{{ message.content }}</div>
+</div>
+{% endfor %}
+{% if messages.is_empty() %}
+<p><em>No messages yet.</em></p>
+{% endif %}
+{% if let Some(cursor) = next_cursor %}
+<p class="pager"><a href="/archive/t/{{ thread_id }}?after={{ cursor }}">Newer messages →</a></p>
+{% endif %}
+</body>
+</html>

@@ -1,0 +1,22 @@
+[package]
+name = "mailer"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+lettre = { version = "0.11.23", default-features = false, features = [
+    "builder",
+    "hostname",
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls",
+    "rustls-native-certs",
+    "ring",
+    "pool",
+] }
+thiserror = "2.0.20"
+tracing = "0.1.41"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }

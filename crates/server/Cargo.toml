@@ -1,0 +1,37 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[dependencies]
+api = { version = "0.1.0", path = "../api" }
+app-core = { version = "0.1.0", path = "../core" }
+auth = { version = "0.1.0", path = "../auth" }
+axum = "0.8.9"
+db = { version = "0.1.0", path = "../db" }
+domain = { version = "0.1.0", path = "../domain" }
+dotenvy = "0.15.7"
+mailer = { version = "0.1.0", path = "../mailer" }
+realtime = { version = "0.1.0", path = "../realtime" }
+serde_json = "1.0.151"
+storage = { version = "0.1.0", path = "../storage" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }
+tower-http = { version = "0.6.2", features = ["fs"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+auth = { version = "0.1.0", path = "../auth", features = ["test-support"] }
+http-body-util = "0.1.5"
+mailer = { version = "0.1.0", path = "../mailer" }
+testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+tower = { version = "0.5.3", features = ["util"] }
