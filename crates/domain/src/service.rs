@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use app_core::{new_id, Uuid};
 use chrono::Utc;
@@ -1399,7 +1399,8 @@ impl DomainService {
         server_id: Uuid,
         ordered_role_ids: Vec<Uuid>,
     ) -> Result<Vec<RoleSummary>, DomainError> {
-        self.require_permission(account_id, server_id, permissions::MANAGE_ROLES)
+        let ctx = self
+            .require_permission(account_id, server_id, permissions::MANAGE_ROLES)
             .await?;
 
         let existing = db::server_role::list_roles(&self.pool, server_id).await?;
@@ -1416,8 +1417,20 @@ impl DomainService {
             ));
         }
 
-        let mut tx = self.pool.begin().await?;
         let top = ordered_role_ids.len() as i32;
+        let old_positions: HashMap<Uuid, i32> =
+            existing.iter().map(|r| (r.id, r.position)).collect();
+        // Every role touched by the reorder is hierarchy-checked against
+        // both its old AND new position — otherwise a MANAGE_ROLES-only
+        // moderator could reorder their own role above a role they could
+        // never directly edit/delete, and inherit that role's authority.
+        for (index, role_id) in ordered_role_ids.iter().enumerate() {
+            let new_position = top - index as i32;
+            Self::check_hierarchy(&ctx, old_positions[role_id])?;
+            Self::check_hierarchy(&ctx, new_position)?;
+        }
+
+        let mut tx = self.pool.begin().await?;
         for (index, role_id) in ordered_role_ids.iter().enumerate() {
             // Highest position = first in the list; the default role stays
             // fixed at 0 below everything, so positions start at 1.

@@ -580,3 +580,68 @@ async fn a_non_mentionable_roles_slug_requires_mention_roles_but_a_mentionable_o
         .await;
     assert!(plain_text.is_ok(), "a token matching no real role/reserved word is not a mention");
 }
+
+// ---- reorder_roles ----
+
+#[tokio::test]
+async fn reorder_roles_rejects_a_moderator_moving_their_own_role_above_a_higher_role() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner5@example.com", "owner5").await;
+    let mod_account = register(&auth, "mod5@example.com", "mod5").await;
+
+    let server = create_server(&domain, owner, "Server5").await;
+    join(&domain, mod_account, server.invite_code.as_ref().unwrap()).await;
+
+    // Created first, so it starts BELOW the role created after it — gives
+    // the moderator's own role less authority than "High".
+    let mod_role_id = grant_role(&domain, owner, server.id, mod_account, "Mod", permissions::MANAGE_ROLES).await;
+    let high_role_id = domain
+        .create_role(owner, server.id, CreateRoleInput { name: "High".to_string() })
+        .await
+        .expect("create_role succeeds")
+        .id;
+
+    let before = domain
+        .list_roles(owner, server.id)
+        .await
+        .expect("list_roles succeeds");
+
+    // The moderator only holds MANAGE_ROLES, not ADMIN, and tries to swap
+    // the order so their own role outranks "High" — the same escalation
+    // `update_role`/`delete_role` already reject via hierarchy checks.
+    let result = domain
+        .reorder_roles(mod_account, server.id, vec![mod_role_id, high_role_id])
+        .await;
+    assert!(matches!(result, Err(DomainError::InsufficientHierarchy)));
+
+    let after = domain
+        .list_roles(owner, server.id)
+        .await
+        .expect("list_roles succeeds");
+    assert_eq!(before, after, "a rejected reorder must not persist partial position changes");
+}
+
+#[tokio::test]
+async fn reorder_roles_allows_the_owner_to_reorder_freely() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner6@example.com", "owner6").await;
+
+    let server = create_server(&domain, owner, "Server6").await;
+    let a_id = domain
+        .create_role(owner, server.id, CreateRoleInput { name: "a".to_string() })
+        .await
+        .expect("create_role succeeds")
+        .id;
+    let b_id = domain
+        .create_role(owner, server.id, CreateRoleInput { name: "b".to_string() })
+        .await
+        .expect("create_role succeeds")
+        .id;
+
+    let result = domain
+        .reorder_roles(owner, server.id, vec![b_id, a_id])
+        .await
+        .expect("owner reorder succeeds");
+    assert_eq!(result[0].id, b_id);
+    assert_eq!(result[1].id, a_id);
+}
