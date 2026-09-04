@@ -117,6 +117,11 @@ pub enum DomainError {
     #[error("role limit reached")]
     RoleLimitReached,
 
+    /// Defense-in-depth cap mirroring `RoleLimitReached`'s own
+    /// reasoning — bounds `channel` row growth per server.
+    #[error("channel limit reached")]
+    ChannelLimitReached,
+
     #[error("account is already banned")]
     AlreadyBanned,
 

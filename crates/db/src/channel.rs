@@ -100,6 +100,21 @@ pub async fn insert_server_channel(
     .await
 }
 
+/// Count of `text`/`voice` channels a server owns — threads are excluded,
+/// they have no bearing on `MAX_CHANNELS_PER_SERVER` (their growth is
+/// unbounded on purpose, scoped per parent channel instead).
+pub async fn count_by_server(
+    executor: impl PgExecutor<'_>,
+    server_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM channel WHERE server_id = $1 AND kind IN ('text', 'voice')",
+    )
+    .bind(server_id)
+    .fetch_one(executor)
+    .await
+}
+
 pub async fn list_by_server(
     executor: impl PgExecutor<'_>,
     server_id: Uuid,

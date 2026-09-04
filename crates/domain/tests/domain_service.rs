@@ -248,6 +248,38 @@ async fn create_channel_by_a_non_member_returns_server_not_found() {
 }
 
 #[tokio::test]
+async fn create_channel_rejects_once_the_server_hits_the_channel_cap() {
+    let (domain, auth, pool, _container) = test_services().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+
+    let server = domain
+        .create_server(alice, create_server_input("Alice's Place"))
+        .await
+        .expect("create_server succeeds");
+
+    // Fills the server to exactly `MAX_CHANNELS_PER_SERVER` (500, private to
+    // `domain`) via direct inserts — bypassing the service layer for speed,
+    // since the cap check itself is the only thing under test here.
+    for i in 0..500 {
+        db::channel::insert_server_channel(&pool, app_core::new_id(), server.id, "text", &format!("filler-{i}"))
+            .await
+            .expect("direct channel insert succeeds");
+    }
+
+    let result = domain
+        .create_channel(
+            alice,
+            server.id,
+            CreateChannelInput {
+                name: "one-too-many".to_string(),
+                kind: None,
+            },
+        )
+        .await;
+    assert!(matches!(result, Err(DomainError::ChannelLimitReached)));
+}
+
+#[tokio::test]
 async fn list_channels_by_a_non_member_returns_server_not_found() {
     let (domain, auth, _pool, _container) = test_services().await;
     let alice = register(&auth, "alice@example.com", "alice").await;

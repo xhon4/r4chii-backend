@@ -11,10 +11,9 @@
 /// equal-or-higher one unless its holder is also the owner.
 pub const ADMIN: i64 = 1 << 0;
 pub const MANAGE_ROLES: i64 = 1 << 1;
-/// Reserved: no channel-management endpoint exists yet (no PATCH/DELETE
-/// channel route — see `ChannelSidebar.tsx`'s own comment on the frontend).
-/// Defined now so its bit position is stable once that ships, not wired to
-/// anything today.
+/// Gates creating a channel, flipping its `restricted` override, and
+/// setting a role's per-channel grant (`create_channel`,
+/// `update_channel_restricted`, `set_channel_role_permission`).
 pub const MANAGE_CHANNELS: i64 = 1 << 2;
 pub const KICK: i64 = 1 << 3;
 pub const BAN: i64 = 1 << 4;

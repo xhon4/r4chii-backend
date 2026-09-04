@@ -231,6 +231,9 @@ impl From<domain::DomainError> for ApiError {
             domain::DomainError::RoleLimitReached => {
                 ApiError::new(StatusCode::CONFLICT, "role_limit_reached", err.to_string())
             }
+            domain::DomainError::ChannelLimitReached => {
+                ApiError::new(StatusCode::CONFLICT, "channel_limit_reached", err.to_string())
+            }
             domain::DomainError::AlreadyBanned => {
                 ApiError::new(StatusCode::CONFLICT, "already_banned", err.to_string())
             }
@@ -489,6 +492,13 @@ mod tests {
         let api_err: ApiError = domain::DomainError::RoleLimitReached.into();
         assert_eq!(api_err.status(), StatusCode::CONFLICT);
         assert_eq!(api_err.code(), "role_limit_reached");
+    }
+
+    #[test]
+    fn channel_limit_reached_maps_to_409() {
+        let api_err: ApiError = domain::DomainError::ChannelLimitReached.into();
+        assert_eq!(api_err.status(), StatusCode::CONFLICT);
+        assert_eq!(api_err.code(), "channel_limit_reached");
     }
 
     #[test]

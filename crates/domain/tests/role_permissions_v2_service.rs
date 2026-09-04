@@ -645,3 +645,36 @@ async fn reorder_roles_allows_the_owner_to_reorder_freely() {
     assert_eq!(result[0].id, b_id);
     assert_eq!(result[1].id, a_id);
 }
+
+// ---- create_channel (MANAGE_CHANNELS) ----
+
+#[tokio::test]
+async fn a_member_with_manage_channels_can_create_a_channel() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner7@example.com", "owner7").await;
+    let mod_account = register(&auth, "mod7@example.com", "mod7").await;
+
+    let server = create_server(&domain, owner, "Server7").await;
+    join(&domain, mod_account, server.invite_code.as_ref().unwrap()).await;
+    grant_role(&domain, owner, server.id, mod_account, "Channel Mod", permissions::MANAGE_CHANNELS).await;
+
+    let result = domain
+        .create_channel(mod_account, server.id, CreateChannelInput { name: "general".to_string(), kind: None })
+        .await;
+    assert!(result.is_ok(), "MANAGE_CHANNELS holder may create a channel");
+}
+
+#[tokio::test]
+async fn a_plain_member_without_manage_channels_cannot_create_a_channel() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner8@example.com", "owner8").await;
+    let plain = register(&auth, "plain8@example.com", "plain8").await;
+
+    let server = create_server(&domain, owner, "Server8").await;
+    join(&domain, plain, server.invite_code.as_ref().unwrap()).await;
+
+    let result = domain
+        .create_channel(plain, server.id, CreateChannelInput { name: "general".to_string(), kind: None })
+        .await;
+    assert!(matches!(result, Err(DomainError::MissingPermission)));
+}

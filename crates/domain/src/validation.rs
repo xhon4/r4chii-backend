@@ -17,6 +17,11 @@ const MAX_THREAD_TITLE_LEN: usize = 200;
 /// Not spec-pinned — a defense-in-depth ceiling on `server_role` row growth
 /// per server, same motivation as `MAX_GROUP_DM_PARTICIPANTS`.
 pub(crate) const MAX_ROLES_PER_SERVER: usize = 250;
+/// Not spec-pinned — a defense-in-depth ceiling on `channel` row growth per
+/// server (text/voice only, threads are unbounded on purpose), same
+/// motivation as `MAX_ROLES_PER_SERVER`. 500 mirrors a generous Discord-like
+/// ceiling.
+pub(crate) const MAX_CHANNELS_PER_SERVER: usize = 500;
 /// Not spec-pinned — the API only requires that "content limits are
 /// validated server-side", with no number — 4000 mirrors a generous
 /// Discord-like ceiling while staying far under Postgres's `TEXT` limit.

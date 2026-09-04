@@ -19,7 +19,7 @@ use crate::validation::{
     extract_mention_tokens, slugify, validate_channel_kind, validate_channel_name,
     validate_group_dm_participants, validate_message_content, validate_role_color,
     validate_role_name, validate_search_query, validate_server_name, validate_thread_title,
-    validate_visibility, MAX_ROLES_PER_SERVER,
+    validate_visibility, MAX_CHANNELS_PER_SERVER, MAX_ROLES_PER_SERVER,
 };
 
 /// The channel kinds that live inside a server and are therefore authorized
@@ -366,15 +366,26 @@ impl DomainService {
         })
     }
 
+    /// Gated on `MANAGE_CHANNELS` (owner/`ADMIN` bypass via
+    /// `require_permission`, same tier as `update_channel_restricted` and
+    /// `set_channel_role_permission`) and capped at
+    /// `MAX_CHANNELS_PER_SERVER`, same defense-in-depth pattern
+    /// `MAX_ROLES_PER_SERVER` already applies to `create_role`.
     pub async fn create_channel(
         &self,
         account_id: Uuid,
         server_id: Uuid,
         input: CreateChannelInput,
     ) -> Result<ChannelSummary, DomainError> {
-        self.require_membership(account_id, server_id).await?;
+        self.require_permission(account_id, server_id, permissions::MANAGE_CHANNELS)
+            .await?;
         validate_channel_name(&input.name)?;
         let kind = validate_channel_kind(input.kind.as_deref())?;
+
+        let count = db::channel::count_by_server(&self.pool, server_id).await?;
+        if count as usize >= MAX_CHANNELS_PER_SERVER {
+            return Err(DomainError::ChannelLimitReached);
+        }
 
         let channel =
             db::channel::insert_server_channel(&self.pool, new_id(), server_id, kind, &input.name)
