@@ -1785,9 +1785,22 @@ impl DomainService {
         message_id: Uuid,
         input: EditMessageInput,
     ) -> Result<MessageSummary, DomainError> {
-        self.require_own_message(account_id, channel_id, message_id)
+        let channel = self
+            .require_own_message(account_id, channel_id, message_id)
             .await?;
         validate_message_content(&input.content)?;
+
+        // Same mention gate `send_message` runs — an edit that inserts a
+        // mention the author couldn't have posted originally must be
+        // rejected exactly the same way, not just checked at creation time.
+        if is_server_channel(&channel.kind) {
+            let server_id = channel.server_id.ok_or(DomainError::ChannelNotFound)?;
+            let tokens = extract_mention_tokens(&input.content);
+            if !tokens.is_empty() {
+                self.check_mention_permissions(account_id, server_id, &tokens)
+                    .await?;
+            }
+        }
 
         let message = db::message::update_content(&self.pool, message_id, channel_id, &input.content)
             .await?
@@ -2408,8 +2421,8 @@ impl DomainService {
         account_id: Uuid,
         channel_id: Uuid,
         message_id: Uuid,
-    ) -> Result<(), DomainError> {
-        self.require_channel_access(account_id, channel_id).await?;
+    ) -> Result<db::channel::ChannelAccessRow, DomainError> {
+        let channel = self.require_channel_access(account_id, channel_id).await?;
 
         let row = db::message::find_owner(&self.pool, message_id, channel_id)
             .await?
@@ -2425,7 +2438,7 @@ impl DomainService {
             return Err(DomainError::NotMessageAuthor);
         }
 
-        Ok(())
+        Ok(channel)
     }
 
     // ---- full export ----

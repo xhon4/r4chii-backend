@@ -8,7 +8,8 @@ use auth::{AuthService, RegisterInput};
 use chrono::{Duration, Utc};
 use domain::{
     permissions, ChannelSummary, CreateChannelInput, CreateRoleInput, CreateServerInput,
-    DomainError, DomainService, SendMessageInput, ServerSummary, TimeoutInput, UpdateRoleInput,
+    DomainError, DomainService, EditMessageInput, SendMessageInput, ServerSummary, TimeoutInput,
+    UpdateRoleInput,
 };
 use testcontainers_modules::{
     postgres::Postgres,
@@ -677,4 +678,49 @@ async fn a_plain_member_without_manage_channels_cannot_create_a_channel() {
         .create_channel(plain, server.id, CreateChannelInput { name: "general".to_string(), kind: None })
         .await;
     assert!(matches!(result, Err(DomainError::MissingPermission)));
+}
+
+// ---- edit_message mention gate ----
+
+#[tokio::test]
+async fn a_plain_member_cannot_insert_an_at_everyone_mention_by_editing() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner15b@example.com", "owner15b").await;
+    let plain = register(&auth, "plain15b@example.com", "plain15b").await;
+
+    let server = create_server(&domain, owner, "Server15b").await;
+    join(&domain, plain, server.invite_code.as_ref().unwrap()).await;
+    let channel = create_channel(&domain, owner, server.id).await;
+
+    let message = domain
+        .send_message(plain, channel.id, SendMessageInput { content: "hi".to_string() })
+        .await
+        .expect("innocuous message sends");
+
+    let result = domain
+        .edit_message(plain, channel.id, message.id, EditMessageInput { content: "@everyone hi".to_string() })
+        .await;
+    assert!(matches!(result, Err(DomainError::MentionNotAllowed)));
+}
+
+#[tokio::test]
+async fn mention_everyone_grants_the_at_everyone_token_on_edit_too() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner16b@example.com", "owner16b").await;
+    let announcer = register(&auth, "announcer16b@example.com", "announcer16b").await;
+
+    let server = create_server(&domain, owner, "Server16b").await;
+    join(&domain, announcer, server.invite_code.as_ref().unwrap()).await;
+    grant_role(&domain, owner, server.id, announcer, "Announcer", permissions::MENTION_EVERYONE).await;
+    let channel = create_channel(&domain, owner, server.id).await;
+
+    let message = domain
+        .send_message(announcer, channel.id, SendMessageInput { content: "hi".to_string() })
+        .await
+        .expect("innocuous message sends");
+
+    domain
+        .edit_message(announcer, channel.id, message.id, EditMessageInput { content: "@everyone hi".to_string() })
+        .await
+        .expect("MENTION_EVERYONE holder may insert @everyone via edit");
 }
