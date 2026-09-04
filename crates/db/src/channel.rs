@@ -178,6 +178,28 @@ pub async fn list_threads_by_parent(
     .await
 }
 
+/// Batched form of `list_threads_by_parent` — every thread under ANY of
+/// `parent_channel_ids`, ordered by parent then newest first, in one query
+/// instead of one per parent. `DomainService::build_and_upload_export`'s own
+/// way of fetching every server channel's threads in one round trip.
+pub async fn list_threads_by_parents(
+    executor: impl PgExecutor<'_>,
+    parent_channel_ids: &[Uuid],
+) -> Result<Vec<ChannelRow>, sqlx::Error> {
+    if parent_channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, ChannelRow>(
+        "SELECT id, server_id, kind, name, created_at, visibility, \
+                parent_channel_id, root_message_id, title, slug, restricted \
+         FROM channel WHERE parent_channel_id = ANY($1) AND kind = 'thread' \
+         ORDER BY parent_channel_id, created_at DESC",
+    )
+    .bind(parent_channel_ids)
+    .fetch_all(executor)
+    .await
+}
+
 /// A single thread by id, only if it really is one (`kind = 'thread'`) —
 /// the public read path's lookup. Passing a non-thread id (a
 /// text/voice/dm channel) returns `None`, same as a nonexistent id, since
@@ -382,6 +404,32 @@ pub async fn role_has_channel_permission(
     .bind(role_ids)
     .bind(bit)
     .fetch_one(executor)
+    .await
+}
+
+/// Batched form of `role_has_channel_permission` — every id among
+/// `channel_ids` for which ANY of `role_ids` holds `bit`, in one query
+/// instead of one per channel. `DomainService::list_channels`'s own way of
+/// resolving the grant check for every restricted channel in a listing up
+/// front, same "batch resolve in Rust" split `restricted_flags_for` already
+/// applies to the restriction flag itself.
+pub async fn channel_ids_with_role_permission(
+    executor: impl PgExecutor<'_>,
+    channel_ids: &[Uuid],
+    role_ids: &[Uuid],
+    bit: i64,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    if channel_ids.is_empty() || role_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_scalar(
+        "SELECT DISTINCT channel_id FROM channel_role_permission \
+         WHERE channel_id = ANY($1) AND role_id = ANY($2) AND permissions & $3 != 0",
+    )
+    .bind(channel_ids)
+    .bind(role_ids)
+    .bind(bit)
+    .fetch_all(executor)
     .await
 }
 

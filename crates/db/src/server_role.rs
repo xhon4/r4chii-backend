@@ -80,6 +80,28 @@ pub async fn find_role(
     .await
 }
 
+/// Batched form of `find_role` — every `role_ids` row that belongs to
+/// `server_id`, in one query instead of one per id.
+/// `DomainService::set_member_roles`'s own way of validating and hierarchy-
+/// checking a whole role diff without a query per touched/target id.
+pub async fn find_roles(
+    executor: impl PgExecutor<'_>,
+    server_id: Uuid,
+    role_ids: &[Uuid],
+) -> Result<Vec<ServerRoleRow>, sqlx::Error> {
+    if role_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, ServerRoleRow>(
+        "SELECT id, server_id, name, color, permissions, position, is_default, created_at, mentionable \
+         FROM server_role WHERE server_id = $1 AND id = ANY($2)",
+    )
+    .bind(server_id)
+    .bind(role_ids)
+    .fetch_all(executor)
+    .await
+}
+
 /// Highest `position` outranks lowest, matching the UI's top-to-bottom role
 /// list.
 pub async fn list_roles(

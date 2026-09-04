@@ -724,3 +724,34 @@ async fn mention_everyone_grants_the_at_everyone_token_on_edit_too() {
         .await
         .expect("MENTION_EVERYONE holder may insert @everyone via edit");
 }
+
+// ---- set_member_roles error paths (batched role lookup) ----
+
+#[tokio::test]
+async fn set_member_roles_rejects_an_unknown_role_id() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner18@example.com", "owner18").await;
+    let target = register(&auth, "target18@example.com", "target18").await;
+
+    let server = create_server(&domain, owner, "Server18").await;
+    join(&domain, target, server.invite_code.as_ref().unwrap()).await;
+
+    let result = domain.set_member_roles(owner, server.id, target, vec![app_core::new_id()]).await;
+    assert!(matches!(result, Err(DomainError::RoleNotFound)));
+}
+
+#[tokio::test]
+async fn set_member_roles_rejects_explicitly_assigning_the_default_role() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner19@example.com", "owner19").await;
+    let target = register(&auth, "target19@example.com", "target19").await;
+
+    let server = create_server(&domain, owner, "Server19").await;
+    join(&domain, target, server.invite_code.as_ref().unwrap()).await;
+
+    let roles = domain.list_roles(owner, server.id).await.expect("list_roles succeeds");
+    let default_role = roles.iter().find(|r| r.is_default).expect("a default role exists");
+
+    let result = domain.set_member_roles(owner, server.id, target, vec![default_role.id]).await;
+    assert!(matches!(result, Err(DomainError::CannotModifyDefaultRole)));
+}

@@ -127,6 +127,30 @@ pub async fn list_all_for_export(
     .await
 }
 
+/// Batched form of `list_all_for_export` — every non-deleted message across
+/// ANY of `channel_ids`, ordered by channel then id, in one query instead of
+/// one per channel/thread. `DomainService::build_and_upload_export`'s own way
+/// of fetching every message in a server (top-level channels and their
+/// threads alike) in one round trip; the caller groups rows by
+/// `channel_id` in Rust.
+pub async fn list_all_for_export_batch(
+    executor: impl PgExecutor<'_>,
+    channel_ids: &[Uuid],
+) -> Result<Vec<MessageRow>, sqlx::Error> {
+    if channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, MessageRow>(
+        "SELECT id, channel_id, author_account_id, content, created_at, edited_at, deleted_at, pinned_at \
+         FROM message \
+         WHERE channel_id = ANY($1) AND deleted_at IS NULL \
+         ORDER BY channel_id, id ASC",
+    )
+    .bind(channel_ids)
+    .fetch_all(executor)
+    .await
+}
+
 /// One message as rendered on the public read path — author
 /// DISPLAY NAME already joined in (the public page has no client-side
 /// account cache to resolve an id against, unlike the SPA), content only

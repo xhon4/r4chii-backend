@@ -464,26 +464,54 @@ impl DomainService {
                 .collect()
         };
 
-        let mut visible = Vec::with_capacity(rows.len());
-        for row in rows {
-            let (effective_restricted, grant_channel_id) = match row.parent_channel_id {
-                Some(parent_id) => (*parent_restricted.get(&parent_id).unwrap_or(&false), parent_id),
-                None => (row.restricted, row.id),
-            };
+        // Resolve every row's (effective_restricted, grant_channel_id) up
+        // front, then batch-fetch the grant check for every distinct
+        // restricted grant target in one query — same split
+        // `restricted_flags_for` above already applies to the restriction
+        // flag itself, now extended to the grant check that used to run one
+        // query per restricted channel in the loop below.
+        let resolved: Vec<(db::channel::ChannelRow, bool, Uuid)> = rows
+            .into_iter()
+            .map(|row| {
+                let (effective_restricted, grant_channel_id) = match row.parent_channel_id {
+                    Some(parent_id) => (
+                        *parent_restricted.get(&parent_id).unwrap_or(&false),
+                        parent_id,
+                    ),
+                    None => (row.restricted, row.id),
+                };
+                (row, effective_restricted, grant_channel_id)
+            })
+            .collect();
 
-            let can_view = !effective_restricted
-                || db::channel::role_has_channel_permission(
-                    &self.pool,
-                    grant_channel_id,
-                    &ctx.role_ids,
-                    channel_permissions::VIEW_CHANNEL,
-                )
-                .await?;
+        let restricted_grant_ids: Vec<Uuid> = {
+            let mut ids: Vec<Uuid> = resolved
+                .iter()
+                .filter(|(_, restricted, _)| *restricted)
+                .map(|(_, _, grant_id)| *grant_id)
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let granted: std::collections::HashSet<Uuid> =
+            db::channel::channel_ids_with_role_permission(
+                &self.pool,
+                &restricted_grant_ids,
+                &ctx.role_ids,
+                channel_permissions::VIEW_CHANNEL,
+            )
+            .await?
+            .into_iter()
+            .collect();
 
-            if can_view {
-                visible.push(row.into());
-            }
-        }
+        let visible = resolved
+            .into_iter()
+            .filter(|(_, effective_restricted, grant_channel_id)| {
+                !effective_restricted || granted.contains(grant_channel_id)
+            })
+            .map(|(row, _, _)| row.into())
+            .collect();
 
         Ok(visible)
     }
@@ -1488,13 +1516,40 @@ impl DomainService {
                 .collect();
         let next_role_ids: HashSet<Uuid> = role_ids.iter().copied().collect();
 
+        // Batch-fetch every role either side of the diff could reference —
+        // the touched (symmetric-difference) set plus the full next list —
+        // in one query instead of one per id, keyed by id for the two
+        // lookups below.
+        let union_ids: Vec<Uuid> = current_role_ids.union(&next_role_ids).copied().collect();
+        let roles_by_id: std::collections::HashMap<Uuid, db::server_role::ServerRoleRow> =
+            db::server_role::find_roles(&self.pool, server_id, &union_ids)
+                .await?
+                .into_iter()
+                .map(|role| (role.id, role))
+                .collect();
+
+        // Every id in the new list must genuinely belong to this server —
+        // otherwise a foreign role id would silently vanish from
+        // `current_role_ids`'s perspective while still failing the
+        // `membership_role` insert's FK, surfacing as an opaque 500 instead
+        // of a clean 404.
+        for role_id in &next_role_ids {
+            if !roles_by_id.contains_key(role_id) {
+                return Err(DomainError::RoleNotFound);
+            }
+        }
+
         // Every role that appears on exactly one side (added or removed)
         // needs its own hierarchy check — a diff-of-one that happens to net
-        // out even is still an attempt to touch that specific role.
+        // out even is still an attempt to touch that specific role. A
+        // current-side id not in `roles_by_id` would mean a role vanished
+        // out from under an existing assignment — same `RoleNotFound` shape
+        // `find_role` gave per-id before this was batched.
         let mut touched = Vec::new();
         for role_id in current_role_ids.symmetric_difference(&next_role_ids) {
-            let role = db::server_role::find_role(&self.pool, server_id, *role_id)
-                .await?
+            let role = roles_by_id
+                .get(role_id)
+                .cloned()
                 .ok_or(DomainError::RoleNotFound)?;
             if role.is_default {
                 return Err(DomainError::CannotModifyDefaultRole);
@@ -1503,20 +1558,6 @@ impl DomainService {
         }
         for role in &touched {
             Self::check_hierarchy(&ctx, role.position)?;
-        }
-
-        // Every id in the new list must genuinely belong to this server —
-        // otherwise a foreign role id would silently vanish from
-        // `current_role_ids`'s perspective while still failing the
-        // `membership_role` insert's FK, surfacing as an opaque 500 instead
-        // of a clean 404.
-        for role_id in &next_role_ids {
-            if db::server_role::find_role(&self.pool, server_id, *role_id)
-                .await?
-                .is_none()
-            {
-                return Err(DomainError::RoleNotFound);
-            }
         }
 
         let mut tx = self.pool.begin().await?;
@@ -2527,29 +2568,68 @@ impl DomainService {
         job_id: Uuid,
     ) -> Result<(String, String), DomainError> {
         let channels = db::channel::list_by_server(&self.pool, server_id).await?;
+        let top_level_ids: Vec<Uuid> = channels
+            .iter()
+            .filter(|c| c.kind != "thread")
+            .map(|c| c.id)
+            .collect();
+
+        // Every thread under every top-level channel, and every message in
+        // every top-level channel AND thread, fetched in two round trips
+        // total instead of two per channel plus one per thread — grouped
+        // back into per-channel/per-thread buckets here in Rust, same
+        // "batch resolve" split the rest of the crate already uses for
+        // listing paths (see `list_channels`'s own restricted-flag/grant
+        // batching).
+        let threads = db::channel::list_threads_by_parents(&self.pool, &top_level_ids).await?;
+        let thread_ids: Vec<Uuid> = threads.iter().map(|t| t.id).collect();
+        let mut threads_by_parent: std::collections::HashMap<Uuid, Vec<db::channel::ChannelRow>> =
+            std::collections::HashMap::new();
+        for thread in threads {
+            if let Some(parent_id) = thread.parent_channel_id {
+                threads_by_parent.entry(parent_id).or_default().push(thread);
+            }
+        }
+
+        let all_ids: Vec<Uuid> = top_level_ids.iter().copied().chain(thread_ids).collect();
+        let messages = db::message::list_all_for_export_batch(&self.pool, &all_ids).await?;
+        let mut messages_by_channel: std::collections::HashMap<Uuid, Vec<db::message::MessageRow>> =
+            std::collections::HashMap::new();
+        for message in messages {
+            messages_by_channel
+                .entry(message.channel_id)
+                .or_default()
+                .push(message);
+        }
+
+        let empty_messages: Vec<db::message::MessageRow> = Vec::new();
+        let empty_threads: Vec<db::channel::ChannelRow> = Vec::new();
 
         let mut channels_json = Vec::new();
         for channel in channels.iter().filter(|c| c.kind != "thread") {
-            let messages = db::message::list_all_for_export(&self.pool, channel.id).await?;
-            let threads = db::channel::list_threads_by_parent(&self.pool, channel.id).await?;
+            let channel_messages = messages_by_channel.get(&channel.id).unwrap_or(&empty_messages);
+            let channel_threads = threads_by_parent.get(&channel.id).unwrap_or(&empty_threads);
 
-            let mut threads_json = Vec::new();
-            for thread in &threads {
-                let thread_messages = db::message::list_all_for_export(&self.pool, thread.id).await?;
-                threads_json.push(serde_json::json!({
-                    "id": thread.id.to_string(),
-                    "title": thread.title,
-                    "created_at": thread.created_at,
-                    "messages": thread_messages.iter().map(message_export_json).collect::<Vec<_>>(),
-                }));
-            }
+            let threads_json: Vec<_> = channel_threads
+                .iter()
+                .map(|thread| {
+                    let thread_messages =
+                        messages_by_channel.get(&thread.id).unwrap_or(&empty_messages);
+                    serde_json::json!({
+                        "id": thread.id.to_string(),
+                        "title": thread.title,
+                        "created_at": thread.created_at,
+                        "messages": thread_messages.iter().map(message_export_json).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
 
             channels_json.push(serde_json::json!({
                 "id": channel.id.to_string(),
                 "kind": channel.kind,
                 "name": channel.name,
                 "created_at": channel.created_at,
-                "messages": messages.iter().map(message_export_json).collect::<Vec<_>>(),
+                "messages": channel_messages.iter().map(message_export_json).collect::<Vec<_>>(),
                 "threads": threads_json,
             }));
         }
