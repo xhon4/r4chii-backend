@@ -931,6 +931,15 @@ impl DomainService {
             return Err(DomainError::AccountNotFound);
         }
 
+        for participant_id in &participants {
+            if self
+                .blocked_either_direction(account_id, *participant_id)
+                .await?
+            {
+                return Err(DomainError::Blocked);
+            }
+        }
+
         let mut tx = self.pool.begin().await?;
 
         let channel_id = new_id();

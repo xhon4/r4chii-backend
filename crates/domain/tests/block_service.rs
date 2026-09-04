@@ -1,6 +1,6 @@
 use app_core::Uuid;
 use auth::{AuthService, RegisterInput};
-use domain::{DomainError, DomainService};
+use domain::{CreateGroupDmInput, DomainError, DomainService};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{runners::AsyncRunner, ImageExt},
@@ -207,4 +207,24 @@ async fn unblocking_restores_the_ability_to_message_in_an_existing_dm() {
         .send_message(alice, channel.id, domain::SendMessageInput { content: "hi".to_string() })
         .await
         .expect("message after unblock succeeds");
+}
+
+#[tokio::test]
+async fn a_block_prevents_creating_a_group_dm_that_includes_the_blocked_account() {
+    let (domain, auth, _pool, _container) = test_services().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+    let carol = register(&auth, "carol@example.com", "carol").await;
+
+    domain.block_account(alice, bob).await.unwrap();
+
+    let from_blocker = domain
+        .create_group_dm(alice, CreateGroupDmInput { account_ids: vec![bob, carol] })
+        .await;
+    let from_blocked = domain
+        .create_group_dm(bob, CreateGroupDmInput { account_ids: vec![alice, carol] })
+        .await;
+
+    assert!(matches!(from_blocker, Err(DomainError::Blocked)));
+    assert!(matches!(from_blocked, Err(DomainError::Blocked)));
 }
