@@ -529,14 +529,14 @@ pub async fn insert_membership(
         .map(|_| ())
 }
 
-/// A `membership` row's id and coarse `role` (`owner`|`member`) — the two
-/// things M2's permission check needs beyond existence: `membership_role`
-/// hangs off the id, and the owner-bypass check reads `role` exactly the way
-/// `ServerSummary::from` already does.
+/// Membership state shared by permission checks and per-server profile context.
+/// Role assignments hang off `id`; `role` carries the owner bypass.
 #[derive(sqlx::FromRow)]
 pub struct MembershipRow {
     pub id: Uuid,
     pub role: String,
+    pub nickname: Option<String>,
+    pub joined_at: DateTime<Utc>,
     /// `Some(t)` where `t` is in the future means the member may
     /// not send messages, create threads, or join voice until it passes.
     pub timeout_until: Option<DateTime<Utc>>,
@@ -548,7 +548,8 @@ pub async fn find_membership(
     account_id: Uuid,
 ) -> Result<Option<MembershipRow>, sqlx::Error> {
     sqlx::query_as::<_, MembershipRow>(
-        "SELECT id, role, timeout_until FROM membership WHERE server_id = $1 AND account_id = $2",
+        "SELECT id, role, nickname, joined_at, timeout_until FROM membership \
+         WHERE server_id = $1 AND account_id = $2",
     )
     .bind(server_id)
     .bind(account_id)

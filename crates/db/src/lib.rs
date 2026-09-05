@@ -13,6 +13,7 @@ pub mod export;
 pub mod friendship;
 pub mod lock;
 pub mod message;
+pub mod profile;
 pub mod server;
 pub mod server_role;
 
