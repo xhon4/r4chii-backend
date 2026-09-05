@@ -34,6 +34,7 @@ async fn migrations_create_core_tables() {
         "message",
         "friendship",
         "block",
+        "account_profile_link",
     ];
 
     for table in expected_tables {
@@ -47,4 +48,126 @@ async fn migrations_create_core_tables() {
 
         assert!(exists.0, "expected table `{table}` to exist after migrations");
     }
+
+    let profile_columns: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'account' \
+         AND (column_name, udt_name) IN ( \
+             ('status', 'presence_status'), \
+             ('custom_status', 'text'), \
+             ('custom_emoji', 'text'), \
+             ('custom_expires_at', 'timestamptz'), \
+             ('theme', 'jsonb'), \
+             ('vis_bio', 'visibility'), \
+             ('vis_communities', 'visibility'), \
+             ('vis_friends', 'visibility'), \
+             ('deleted_at', 'timestamptz') \
+         )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or_else(|err| panic!("failed to inspect account profile columns: {err}"));
+
+    assert_eq!(profile_columns.0, 9, "expected all account profile columns");
+
+    let link_id_has_default: (bool,) = sqlx::query_as(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM pg_attrdef default_value \
+             JOIN pg_attribute attribute \
+               ON attribute.attrelid = default_value.adrelid \
+              AND attribute.attnum = default_value.adnum \
+             WHERE default_value.adrelid = 'account_profile_link'::regclass \
+               AND attribute.attname = 'id' \
+         )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or_else(|err| panic!("failed to inspect account_profile_link id default: {err}"));
+
+    assert!(
+        !link_id_has_default.0,
+        "profile link IDs must be generated in Rust"
+    );
+
+    sqlx::query(
+        "INSERT INTO account (id, username, email, display_name) \
+         VALUES ( \
+             '00000000-0000-0000-0000-000000000017', \
+             'profile-migration-test', \
+             'profile-migration-test@example.com', \
+             'Profile Migration Test' \
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|err| panic!("failed to create profile migration account: {err}"));
+
+    let defaults: (String, String, String, String, String) = sqlx::query_as(
+        "SELECT status::text, theme::text, vis_bio::text, vis_communities::text, vis_friends::text \
+         FROM account WHERE username = 'profile-migration-test'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or_else(|err| panic!("failed to read account profile defaults: {err}"));
+
+    assert_eq!(
+        defaults,
+        (
+            "online".to_owned(),
+            "{}".to_owned(),
+            "public".to_owned(),
+            "friends".to_owned(),
+            "friends".to_owned(),
+        ),
+        "new accounts must receive the M1 profile defaults"
+    );
+
+    sqlx::query(
+        "INSERT INTO account_profile_link (id, account_id, label, url, position) \
+         VALUES ( \
+             '00000000-0000-0000-0000-000000000018', \
+             '00000000-0000-0000-0000-000000000017', \
+             'Personal site', \
+             'https://example.com', \
+             0 \
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|err| panic!("failed to create profile link: {err}"));
+
+    let duplicate_position = sqlx::query(
+        "INSERT INTO account_profile_link (id, account_id, label, url, position) \
+         VALUES ( \
+             '00000000-0000-0000-0000-000000000019', \
+             '00000000-0000-0000-0000-000000000017', \
+             'Second link', \
+             'https://example.org', \
+             0 \
+         )",
+    )
+    .execute(&pool)
+    .await;
+
+    assert!(
+        duplicate_position.is_err(),
+        "profile links must be unique per account position"
+    );
+
+    let invalid_custom_status = sqlx::query(
+        "INSERT INTO account (id, username, email, display_name, custom_status) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind("00000000-0000-0000-0000-000000000020")
+    .bind("profile-status-limit-test")
+    .bind("profile-status-limit-test@example.com")
+    .bind("Profile Status Limit Test")
+    .bind("x".repeat(129))
+    .execute(&pool)
+    .await;
+
+    assert!(
+        invalid_custom_status.is_err(),
+        "custom statuses longer than 128 characters must be rejected"
+    );
 }
