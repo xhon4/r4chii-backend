@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use app_core::new_id;
 use auth::{AuthError, AuthService, LoginInput, RegisterInput, VerifyRegistrationInput};
 use mailer::{CaptureMailer, MailError, MailFuture, Mailer, OutgoingMail};
 use testcontainers_modules::{
@@ -592,6 +593,143 @@ async fn a_failed_resend_leaves_the_previous_code_intact() {
         .await
         .expect("the original code still verifies after a failed resend");
     assert_eq!(account.username, "yara");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_username_race_at_insert_time_reports_username_taken_not_a_database_error() {
+    let h = harness().await;
+
+    // Holds a competing row uncommitted so the real register() call below
+    // clears its own preflight check with a clean read (the competitor is
+    // invisible under snapshot isolation until committed) and only collides
+    // once it reaches its own INSERT — the exact TOCTOU a preflight-only
+    // check can never close by itself. Postgres makes a second inserter of a
+    // conflicting unique key wait on a still-open transaction holding it.
+    let mut competitor = h.pool.begin().await.expect("competitor transaction begins");
+    sqlx::query(
+        "INSERT INTO pending_registration \
+         (id, email, username, display_name, password_hash, code_digest, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, now() + interval '15 minutes')",
+    )
+    .bind(new_id())
+    .bind("competitor@example.com")
+    .bind("contested")
+    .bind("Competitor")
+    .bind("irrelevant-hash")
+    .bind("irrelevant-digest")
+    .execute(&mut *competitor)
+    .await
+    .expect("competitor insert runs");
+
+    let service = h.service.clone();
+    let racer = tokio::spawn(async move {
+        service
+            .register(register_input("mia@example.com", "contested"))
+            .await
+    });
+
+    // Wait until the racer is actually blocked on the competitor's
+    // uncommitted row before releasing it, so the ordering is observed
+    // rather than guessed at with a fixed sleep — the exact gap the
+    // original attempt at this test was criticized for papering over.
+    let mut blocked = false;
+    for _ in 0..200 {
+        let (waiting,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid() \
+             )",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("lock-wait poll runs");
+        if waiting {
+            blocked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        blocked,
+        "the racing register() call never reached its own INSERT and blocked on the competitor's row"
+    );
+
+    competitor
+        .commit()
+        .await
+        .expect("competitor transaction commits");
+
+    let result = racer.await.expect("register task does not panic");
+    assert!(matches!(result, Err(AuthError::UsernameTaken)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_email_race_at_insert_time_is_silent_like_the_already_registered_branch() {
+    let h = harness().await;
+
+    // Same TOCTOU as the username race above, but on the other unique
+    // column: the preflight-only guards clear against a still-uncommitted
+    // competitor and the collision only surfaces at INSERT time.
+    let mut competitor = h.pool.begin().await.expect("competitor transaction begins");
+    sqlx::query(
+        "INSERT INTO pending_registration \
+         (id, email, username, display_name, password_hash, code_digest, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, now() + interval '15 minutes')",
+    )
+    .bind(new_id())
+    .bind("shared@example.com")
+    .bind("competitor_email")
+    .bind("Competitor")
+    .bind("irrelevant-hash")
+    .bind("irrelevant-digest")
+    .execute(&mut *competitor)
+    .await
+    .expect("competitor insert runs");
+
+    let service = h.service.clone();
+    let racer = tokio::spawn(async move {
+        service
+            .register(register_input("shared@example.com", "racer_email"))
+            .await
+    });
+
+    let mut blocked = false;
+    for _ in 0..200 {
+        let (waiting,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid() \
+             )",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("lock-wait poll runs");
+        if waiting {
+            blocked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        blocked,
+        "the racing register() call never reached its own INSERT and blocked on the competitor's row"
+    );
+
+    competitor
+        .commit()
+        .await
+        .expect("competitor transaction commits");
+
+    let result = racer.await.expect("register task does not panic");
+    assert!(
+        result.is_ok(),
+        "an email lost at INSERT time answers exactly like the already-registered branch: {result:?}"
+    );
+    assert_eq!(
+        pending_count_any_case(&h.pool, "shared@example.com").await,
+        1,
+        "only the competitor's row exists; the racer's insert never landed"
+    );
 }
 
 #[tokio::test]

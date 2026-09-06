@@ -270,7 +270,16 @@ impl AuthService {
 
         // Safe to assert: built only from a fixed Rust integer constant,
         // never from request input.
-        sqlx::query(sqlx::AssertSqlSafe(insert_sql))
+        //
+        // The preflight checks above only reject what was already committed
+        // at read time — two callers can both clear them and then collide
+        // right here, since nothing serializes them before this INSERT. That
+        // TOCTOU is closed by mapping the constraint violation itself rather
+        // than trying to prevent the race: a username loss reports the same
+        // `UsernameTaken` the preflight would have given if it had run a
+        // moment later; an email loss answers exactly like the already-taken
+        // branch above, silently, since a concurrent winner already exists.
+        if let Err(err) = sqlx::query(sqlx::AssertSqlSafe(insert_sql))
             .bind(pending_id)
             .bind(&email)
             .bind(&input.username)
@@ -278,7 +287,14 @@ impl AuthService {
             .bind(&password_hash)
             .bind(&code_digest)
             .execute(&mut *tx)
-            .await?;
+            .await
+        {
+            return match pending_registration_conflict(&err) {
+                Some("pending_registration_username_key") => Err(AuthError::UsernameTaken),
+                Some("pending_registration_email_key") => Ok(()),
+                _ => Err(AuthError::Database(err)),
+            };
+        }
 
         // Sent before commit, not after: a failed delivery must not leave a
         // live row behind that nobody received the code for, backed by a
@@ -888,4 +904,14 @@ fn map_account_conflict(err: sqlx::Error) -> AuthError {
         }
     }
     AuthError::Database(err)
+}
+
+/// The `pending_registration` unique constraint violated by `err`, if any.
+fn pending_registration_conflict(err: &sqlx::Error) -> Option<&str> {
+    if let sqlx::Error::Database(db_err) = err {
+        if db_err.is_unique_violation() {
+            return db_err.constraint();
+        }
+    }
+    None
 }
