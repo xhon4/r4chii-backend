@@ -664,6 +664,90 @@ async fn fifth_concurrent_login_is_rejected_with_session_limit_reached() {
     assert!(matches!(fifth, Err(AuthError::SessionLimitReached)));
 }
 
+#[tokio::test]
+async fn an_idle_session_no_longer_counts_against_the_login_quota() {
+    let h = harness().await;
+    register_and_verify(&h, "walter@example.com", "walter").await;
+
+    let login_input = || LoginInput {
+        email: "walter@example.com".to_string(),
+        password: "correct horse battery staple".to_string(),
+    };
+
+    for attempt in 1..=4 {
+        h.service
+            .login(login_input())
+            .await
+            .unwrap_or_else(|err| panic!("login {attempt} should succeed: {err}"));
+    }
+    assert!(matches!(
+        h.service.login(login_input()).await,
+        Err(AuthError::SessionLimitReached)
+    ));
+
+    // Age one session past the idle window without touching its absolute
+    // expiry: `verify_session` would already refuse it, but the quota still
+    // treated it as an occupied slot.
+    sqlx::query(
+        "UPDATE session SET last_used_at = now() - interval '15 days' \
+         WHERE id = ( \
+             SELECT s.id FROM session s \
+             JOIN account a ON a.id = s.account_id \
+             WHERE a.email = $1 \
+             ORDER BY s.created_at ASC \
+             LIMIT 1 \
+         )",
+    )
+    .bind("walter@example.com")
+    .execute(&h.pool)
+    .await
+    .expect("aging one session succeeds");
+
+    // With the idle session no longer counted, there is room for one more.
+    h.service
+        .login(login_input())
+        .await
+        .expect("a login succeeds once the idle session stops occupying a slot");
+
+    // And the quota still holds against the sessions that remain eligible.
+    assert!(matches!(
+        h.service.login(login_input()).await,
+        Err(AuthError::SessionLimitReached)
+    ));
+}
+
+#[tokio::test]
+async fn list_sessions_omits_a_session_past_its_idle_window() {
+    let h = harness().await;
+    let account = register_and_verify(&h, "yusuf@example.com", "yusuf").await;
+
+    let (session, _token) = h
+        .service
+        .login(LoginInput {
+            email: "yusuf@example.com".to_string(),
+            password: "correct horse battery staple".to_string(),
+        })
+        .await
+        .expect("login succeeds");
+
+    sqlx::query("UPDATE session SET last_used_at = now() - interval '15 days' WHERE id = $1")
+        .bind(session.id)
+        .execute(&h.pool)
+        .await
+        .expect("aging the session succeeds");
+
+    let sessions = h
+        .service
+        .list_sessions(account.id)
+        .await
+        .expect("listing sessions succeeds");
+
+    assert!(
+        sessions.is_empty(),
+        "a session past its idle window must not appear as if it were still usable"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_logins_never_exceed_the_session_cap() {
     let h = harness().await;

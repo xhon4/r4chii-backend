@@ -35,6 +35,20 @@ const IDLE_TIMEOUT_DAYS: i64 = 14;
 /// Absolute hard cap in days, regardless of activity.
 const ABSOLUTE_LIFETIME_DAYS: i64 = 90;
 
+/// The single definition of "this session still counts": not revoked, still
+/// inside its absolute lifetime, and touched within the idle window. The
+/// login quota, `verify_session`, and `list_sessions` all filter through this
+/// one fragment so none of them can drift from what the others consider live
+/// — a session past the idle window is already unusable to `verify_session`,
+/// so it must not occupy a login slot or appear as active in a listing.
+fn session_eligibility_sql() -> String {
+    format!(
+        "revoked_at IS NULL \
+         AND absolute_expires_at > now() \
+         AND last_used_at + interval '{IDLE_TIMEOUT_DAYS} days' > now()"
+    )
+}
+
 /// Accounts, auth identities, and sessions — the whole surface of this
 /// crate's session model. Wraps a `db::PgPool` directly (auth owns
 /// its own queries against `account`/`auth_identity`/`session`, a
@@ -679,13 +693,17 @@ impl AuthService {
             .fetch_one(&mut *tx)
             .await?;
 
-        let (active_sessions,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM session \
-             WHERE account_id = $1 AND revoked_at IS NULL AND absolute_expires_at > now()",
-        )
-        .bind(account.id)
-        .fetch_one(&mut *tx)
-        .await?;
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM session WHERE account_id = $1 AND {}",
+            session_eligibility_sql()
+        );
+
+        // Safe to assert: the interpolated fragment is built only from fixed
+        // Rust integer constants, never from request input.
+        let (active_sessions,): (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(count_sql))
+            .bind(account.id)
+            .fetch_one(&mut *tx)
+            .await?;
 
         if active_sessions >= MAX_CONCURRENT_SESSIONS {
             // No silent eviction — the caller must revoke an existing
@@ -724,15 +742,12 @@ impl AuthService {
         let token_hash = hash_token(raw_token);
 
         let select_sql = format!(
-            "SELECT id, account_id FROM session \
-             WHERE token_hash = $1 \
-               AND revoked_at IS NULL \
-               AND absolute_expires_at > now() \
-               AND last_used_at + interval '{IDLE_TIMEOUT_DAYS} days' > now()"
+            "SELECT id, account_id FROM session WHERE token_hash = $1 AND {}",
+            session_eligibility_sql()
         );
 
-        // Safe to assert: `select_sql` is built only from a fixed Rust
-        // integer constant (IDLE_TIMEOUT_DAYS), never from request input.
+        // Safe to assert: the interpolated fragment is built only from fixed
+        // Rust integer constants, never from request input.
         let session = sqlx::query_as::<_, SessionIdentityRow>(sqlx::AssertSqlSafe(select_sql))
             .bind(&token_hash)
             .fetch_optional(&self.pool)
@@ -754,14 +769,19 @@ impl AuthService {
     }
 
     pub async fn list_sessions(&self, account_id: Uuid) -> Result<Vec<SessionSummary>, AuthError> {
-        let rows = sqlx::query_as::<_, SessionRow>(
+        let list_sql = format!(
             "SELECT id, created_at, last_used_at, absolute_expires_at FROM session \
-             WHERE account_id = $1 AND revoked_at IS NULL AND absolute_expires_at > now() \
+             WHERE account_id = $1 AND {} \
              ORDER BY created_at DESC",
-        )
-        .bind(account_id)
-        .fetch_all(&self.pool)
-        .await?;
+            session_eligibility_sql()
+        );
+
+        // Safe to assert: the interpolated fragment is built only from fixed
+        // Rust integer constants, never from request input.
+        let rows = sqlx::query_as::<_, SessionRow>(sqlx::AssertSqlSafe(list_sql))
+            .bind(account_id)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows.into_iter().map(Into::into).collect())
     }
