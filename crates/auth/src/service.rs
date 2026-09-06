@@ -14,8 +14,9 @@ use crate::types::{
     VerifyRegistrationInput,
 };
 use crate::validation::{
-    validate_accent_color, validate_avatar_url, validate_banner_url, validate_bio,
-    validate_display_name, validate_email, validate_password, validate_pronouns, validate_username,
+    normalize_email, validate_accent_color, validate_avatar_url, validate_banner_url,
+    validate_bio, validate_display_name, validate_email, validate_password, validate_pronouns,
+    validate_username,
 };
 use crate::verification::{
     code_matches, digest_code, generate_code, CODE_TTL_MINUTES, MAX_ATTEMPTS,
@@ -174,6 +175,10 @@ impl AuthService {
         validate_password(&input.password)?;
         validate_display_name(&input.display_name)?;
 
+        // Canonicalized once, here, and used for every lookup, guard, and
+        // stored value below — never `input.email` again in this function.
+        let email = normalize_email(&input.email);
+
         // Hash before the existence check, not after. Skipping the argon2 work
         // on the "already registered" path would make that response measurably
         // faster and hand back the oracle the identical response text just
@@ -204,7 +209,7 @@ impl AuthService {
         }
 
         let email_taken = sqlx::query_as::<_, AccountIdRow>("SELECT id FROM account WHERE email = $1")
-            .bind(&input.email)
+            .bind(&email)
             .fetch_optional(&self.pool)
             .await?;
 
@@ -228,7 +233,7 @@ impl AuthService {
             "SELECT id FROM pending_registration \
              WHERE email = $1 AND expires_at > now() FOR UPDATE",
         )
-        .bind(&input.email)
+        .bind(&email)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -237,7 +242,7 @@ impl AuthService {
             return Ok(());
         }
 
-        let recently_mailed = self.mailed_within_cooldown(&mut tx, &input.email).await?;
+        let recently_mailed = self.mailed_within_cooldown(&mut tx, &email).await?;
 
         // Only expired rows are ever removed here — a live row for this
         // email already returned above. Scoped to the caller's own address,
@@ -252,7 +257,7 @@ impl AuthService {
             "DELETE FROM pending_registration \
              WHERE expires_at <= now() AND (email = $1 OR username = $2)",
         )
-        .bind(&input.email)
+        .bind(&email)
         .bind(&input.username)
         .execute(&mut *tx)
         .await?;
@@ -267,7 +272,7 @@ impl AuthService {
         // never from request input.
         sqlx::query(sqlx::AssertSqlSafe(insert_sql))
             .bind(pending_id)
-            .bind(&input.email)
+            .bind(&email)
             .bind(&input.username)
             .bind(&input.display_name)
             .bind(&password_hash)
@@ -281,7 +286,7 @@ impl AuthService {
         // is withheld inside the cooldown. Doing it the other way round would
         // leave the caller holding a code that no longer works.
         if !recently_mailed {
-            self.send_code(&input.email, &code).await?;
+            self.send_code(&email, &code).await?;
         }
 
         Ok(())
@@ -293,9 +298,10 @@ impl AuthService {
     /// Silent when there is no such registration, for the same reason
     /// `register` is silent about a taken address.
     pub async fn resend_verification_code(&self, email: &str) -> Result<(), AuthError> {
+        let email = normalize_email(email);
         let mut tx = self.pool.begin().await?;
 
-        if self.mailed_within_cooldown(&mut tx, email).await? {
+        if self.mailed_within_cooldown(&mut tx, &email).await? {
             // Leave the existing code alone. Rotating it here would let an
             // attacker invalidate a victim's in-flight code at will, simply by
             // hammering resend faster than the victim can type.
@@ -322,7 +328,7 @@ impl AuthService {
         // Safe to assert: fixed Rust constant only.
         let result = sqlx::query(sqlx::AssertSqlSafe(update_sql))
             .bind(&code_digest)
-            .bind(email)
+            .bind(&email)
             .execute(&mut *tx)
             .await?;
 
@@ -332,7 +338,7 @@ impl AuthService {
             return Ok(());
         }
 
-        self.send_code(email, &code).await?;
+        self.send_code(&email, &code).await?;
 
         Ok(())
     }
@@ -383,13 +389,14 @@ impl AuthService {
         // FOR UPDATE so two concurrent verifications of the same registration
         // serialize: without it both could read the same attempt count, or
         // both pass the code check and race to insert the account.
+        let email = normalize_email(&input.email);
         let pending = sqlx::query_as::<_, PendingRegistrationRow>(
             "SELECT id, email, username, display_name, password_hash, code_digest, attempts \
              FROM pending_registration \
              WHERE email = $1 AND expires_at > now() \
              FOR UPDATE",
         )
-        .bind(&input.email)
+        .bind(&email)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -470,7 +477,7 @@ impl AuthService {
 
         let pending = PendingRegistrationRow {
             id: new_id(),
-            email: input.email,
+            email: normalize_email(&input.email),
             username: input.username,
             display_name: input.display_name,
             password_hash,
@@ -656,8 +663,9 @@ impl AuthService {
         // registered emails by response latency alone. So a hash verify
         // — real or, on the missing-account/missing-password paths, a
         // fixed dummy one — always runs before we decide the outcome.
+        let email = normalize_email(&input.email);
         let account = sqlx::query_as::<_, AccountIdRow>("SELECT id FROM account WHERE email = $1")
-            .bind(&input.email)
+            .bind(&email)
             .fetch_optional(&self.pool)
             .await?;
 

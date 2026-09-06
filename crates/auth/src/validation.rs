@@ -31,6 +31,18 @@ pub(crate) fn validate_email(email: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
+/// Canonicalizes an address for every lookup, comparison, and stored value.
+///
+/// Email is effectively case-insensitive in practice: `Bob@x.com` and
+/// `bob@x.com` are the same mailbox to every real provider. Without this,
+/// the same address can claim two accounts, dodge the "already registered"
+/// check, and dodge the resend cooldown, all by changing case. Trimming
+/// surrounding whitespace too, since a pasted address carrying it is not a
+/// different address.
+pub(crate) fn normalize_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
 pub(crate) fn validate_username(username: &str) -> Result<(), AuthError> {
     let len = username.chars().count();
     if !(3..=32).contains(&len) {

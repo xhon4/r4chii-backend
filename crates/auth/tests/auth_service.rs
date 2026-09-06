@@ -86,6 +86,20 @@ async fn account_count(pool: &db::PgPool, email: &str) -> i64 {
     count
 }
 
+/// Case-insensitive on purpose: used to prove no row exists for a mailbox
+/// *regardless of which case it was stored under*, which a same-case count
+/// cannot tell apart from "correctly rejected" versus "accepted under a
+/// different case".
+async fn pending_count_any_case(pool: &db::PgPool, email: &str) -> i64 {
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM pending_registration WHERE lower(email) = lower($1)")
+            .bind(email)
+            .fetch_one(pool)
+            .await
+            .expect("count query runs");
+    count
+}
+
 /// Registers and verifies in one step, for tests whose subject is something
 /// other than the registration flow itself.
 async fn register_and_verify(h: &Harness, email: &str, username: &str) -> auth::AccountSummary {
@@ -431,6 +445,58 @@ async fn a_second_registration_never_replaces_a_live_one() {
         })
         .await;
     assert!(matches!(attacker_login, Err(AuthError::InvalidCredentials)));
+}
+
+#[tokio::test]
+async fn email_case_never_creates_a_duplicate_account_and_still_logs_in() {
+    let h = harness().await;
+
+    h.service
+        .register(register_input("Xavier@Example.COM", "xavier"))
+        .await
+        .expect("registration starts");
+    let code = last_code(&h.mail);
+    let account = h
+        .service
+        .verify_registration(VerifyRegistrationInput {
+            email: "xavier@example.com".to_string(),
+            code,
+        })
+        .await
+        .expect("verification succeeds with the same address in a different case");
+
+    assert_eq!(
+        account.email, "xavier@example.com",
+        "the stored email is normalized to lowercase"
+    );
+
+    // A second registration attempt for the same mailbox, in yet another
+    // case, must look exactly like the already-registered branch: no error,
+    // no mail, no new pending row under any casing.
+    h.mail.clear();
+    h.service
+        .register(register_input("XAVIER@example.com", "xavier_two"))
+        .await
+        .expect("registration reports success either way");
+    assert!(
+        h.mail.sent().is_empty(),
+        "no mail goes to an address that already has an account, regardless of case"
+    );
+    assert_eq!(
+        pending_count_any_case(&h.pool, "xavier@example.com").await,
+        0
+    );
+
+    // Logging in with yet another case still finds the same account.
+    let (_, token) = h
+        .service
+        .login(LoginInput {
+            email: "XaViEr@ExAmPlE.CoM".to_string(),
+            password: "correct horse battery staple".to_string(),
+        })
+        .await
+        .expect("login is case-insensitive on email");
+    assert!(!token.is_empty());
 }
 
 #[tokio::test]
