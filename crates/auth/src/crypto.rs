@@ -75,7 +75,7 @@ pub(crate) fn generate_session_token() -> String {
 /// Hashes an opaque session token for storage as `session.token_hash`.
 /// SHA-256, not argon2/bcrypt: session tokens are already high-entropy
 /// random strings, not human-chosen passwords, so a fast hash is the
-/// correct (and the ADR-mandated) choice.
+/// correct choice.
 pub(crate) fn hash_token(raw_token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(raw_token.as_bytes());
