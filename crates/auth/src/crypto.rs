@@ -69,7 +69,7 @@ pub(crate) fn dummy_password_hash() -> &'static str {
 pub(crate) fn generate_session_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill(&mut bytes);
-    hex_encode(&bytes)
+    hex::encode(bytes)
 }
 
 /// Hashes an opaque session token for storage as `session.token_hash`.
@@ -79,11 +79,7 @@ pub(crate) fn generate_session_token() -> String {
 pub(crate) fn hash_token(raw_token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(raw_token.as_bytes());
-    hex_encode(&hasher.finalize())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]

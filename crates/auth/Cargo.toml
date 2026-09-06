@@ -9,6 +9,7 @@ app-core = { version = "0.1.0", path = "../core" }
 argon2 = { version = "0.5.3", features = ["password-hash", "std"] }
 chrono = { version = "0.4.45", features = ["serde", "clock"] }
 db = { version = "0.1.0", path = "../db" }
+hex = "0.4.3"
 mailer = { version = "0.1.0", path = "../mailer" }
 rand = "0.10.2"
 sha2 = "0.11.0"

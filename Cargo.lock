@@ -276,6 +276,7 @@ dependencies = [
  "auth",
  "chrono",
  "db",
+ "hex",
  "mailer",
  "rand 0.10.2",
  "sha2 0.11.0",
