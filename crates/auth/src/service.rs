@@ -42,6 +42,16 @@ const ABSOLUTE_LIFETIME_DAYS: i64 = 90;
 /// into a read, not a write.
 const LAST_USED_TOUCH_TOLERANCE_MINUTES: i64 = 5;
 
+/// Consecutive failed logins that lock an account. IP-based rate limiting in
+/// `api` does not stop a distributed credential-stuffing attempt against one
+/// specific account; this is the complementary per-account throttle.
+const LOGIN_LOCKOUT_THRESHOLD: i32 = 5;
+
+/// How long a lock lasts, re-applied from "now" on every failure past the
+/// threshold — so continuing to guess during a lock extends it rather than
+/// letting an attacker wait out a fixed window and try again on schedule.
+const LOGIN_LOCKOUT_MINUTES: i64 = 15;
+
 /// The single definition of "this session still counts": not revoked, still
 /// inside its absolute lifetime, and touched within the idle window. The
 /// login quota, `verify_session`, and `list_sessions` all filter through this
@@ -125,9 +135,19 @@ struct PendingRegistrationRow {
     attempts: i32,
 }
 
+/// Existence checks only care whether a row came back, not its contents —
+/// `id` is selected because `FromRow` needs a column to map, not because any
+/// caller reads it.
 #[derive(sqlx::FromRow)]
 struct AccountIdRow {
+    #[allow(dead_code)]
     id: Uuid,
+}
+
+#[derive(sqlx::FromRow)]
+struct LoginAccountRow {
+    id: Uuid,
+    locked_until: Option<DateTime<Utc>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -700,10 +720,12 @@ impl AuthService {
         // — real or, on the missing-account/missing-password paths, a
         // fixed dummy one — always runs before we decide the outcome.
         let email = normalize_email(&input.email);
-        let account = sqlx::query_as::<_, AccountIdRow>("SELECT id FROM account WHERE email = $1")
-            .bind(&email)
-            .fetch_optional(&self.pool)
-            .await?;
+        let account = sqlx::query_as::<_, LoginAccountRow>(
+            "SELECT id, locked_until FROM account WHERE email = $1",
+        )
+        .bind(&email)
+        .fetch_optional(&self.pool)
+        .await?;
 
         let stored_hash = match &account {
             Some(account) => {
@@ -721,9 +743,47 @@ impl AuthService {
 
         let password_matches = verify_password(&input.password, &stored_hash);
 
-        let Some(account) = account.filter(|_| password_matches) else {
+        let Some(account) = account else {
             return Err(AuthError::InvalidCredentials);
         };
+
+        let is_locked = account
+            .locked_until
+            .is_some_and(|locked_until| locked_until > Utc::now());
+
+        if !password_matches || is_locked {
+            // Recorded even when already locked, so continued guessing
+            // extends the lock rather than letting it expire on schedule.
+            // Same `InvalidCredentials` either way — a distinct "your
+            // account is locked" response would itself be the oracle this
+            // function otherwise never gives.
+            let lockout_sql = format!(
+                "UPDATE account \
+                 SET failed_login_attempts = failed_login_attempts + 1, \
+                     locked_until = CASE \
+                         WHEN failed_login_attempts + 1 >= {LOGIN_LOCKOUT_THRESHOLD} \
+                         THEN now() + interval '{LOGIN_LOCKOUT_MINUTES} minutes' \
+                         ELSE locked_until \
+                     END \
+                 WHERE id = $1"
+            );
+
+            // Safe to assert: built only from fixed Rust integer constants,
+            // never from request input.
+            sqlx::query(sqlx::AssertSqlSafe(lockout_sql))
+                .bind(account.id)
+                .execute(&self.pool)
+                .await?;
+
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        sqlx::query(
+            "UPDATE account SET failed_login_attempts = 0, locked_until = NULL WHERE id = $1",
+        )
+        .bind(account.id)
+        .execute(&self.pool)
+        .await?;
 
         let mut tx = self.pool.begin().await?;
 

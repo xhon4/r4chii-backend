@@ -1061,6 +1061,106 @@ async fn list_sessions_omits_a_session_past_its_idle_window() {
 }
 
 #[tokio::test]
+async fn five_failed_logins_lock_the_account_even_for_the_correct_password() {
+    let h = harness().await;
+    register_and_verify(&h, "priya@example.com", "priya").await;
+
+    let wrong_attempt = || LoginInput {
+        email: "priya@example.com".to_string(),
+        password: "wrong password".to_string(),
+    };
+    for _ in 0..5 {
+        let result = h.service.login(wrong_attempt()).await;
+        assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    }
+
+    // The account is now locked; even the correct password is refused, and
+    // indistinguishably from a wrong one — a distinct error here would be
+    // exactly the oracle login otherwise never gives.
+    let result = h
+        .service
+        .login(LoginInput {
+            email: "priya@example.com".to_string(),
+            password: "correct horse battery staple".to_string(),
+        })
+        .await;
+    assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+}
+
+#[tokio::test]
+async fn a_successful_login_resets_the_failed_attempt_counter() {
+    let h = harness().await;
+    register_and_verify(&h, "quinn@example.com", "quinn").await;
+
+    let wrong_attempt = || LoginInput {
+        email: "quinn@example.com".to_string(),
+        password: "wrong password".to_string(),
+    };
+    let correct_attempt = || LoginInput {
+        email: "quinn@example.com".to_string(),
+        password: "correct horse battery staple".to_string(),
+    };
+
+    for _ in 0..4 {
+        let _ = h.service.login(wrong_attempt()).await;
+    }
+    // One below the lock threshold: the correct password still works.
+    h.service
+        .login(correct_attempt())
+        .await
+        .expect("login succeeds before the lock threshold");
+
+    // That success reset the counter: four more failures alone must not
+    // lock the account.
+    for _ in 0..4 {
+        let _ = h.service.login(wrong_attempt()).await;
+    }
+    h.service
+        .login(correct_attempt())
+        .await
+        .expect("the counter reset after the earlier success, so this is not locked");
+}
+
+#[tokio::test]
+async fn a_lock_expires_after_its_window() {
+    let h = harness().await;
+    let account = register_and_verify(&h, "reza@example.com", "reza").await;
+
+    for _ in 0..5 {
+        let _ = h
+            .service
+            .login(LoginInput {
+                email: "reza@example.com".to_string(),
+                password: "wrong password".to_string(),
+            })
+            .await;
+    }
+    let locked = h
+        .service
+        .login(LoginInput {
+            email: "reza@example.com".to_string(),
+            password: "correct horse battery staple".to_string(),
+        })
+        .await;
+    assert!(matches!(locked, Err(AuthError::InvalidCredentials)));
+
+    // Simulate the lock window having elapsed.
+    sqlx::query("UPDATE account SET locked_until = now() - interval '1 minute' WHERE id = $1")
+        .bind(account.id)
+        .execute(&h.pool)
+        .await
+        .expect("lock wind-back runs");
+
+    h.service
+        .login(LoginInput {
+            email: "reza@example.com".to_string(),
+            password: "correct horse battery staple".to_string(),
+        })
+        .await
+        .expect("login succeeds once the lock window has passed");
+}
+
+#[tokio::test]
 async fn verify_session_skips_the_touch_write_within_the_tolerance_window() {
     let h = harness().await;
     register_and_verify(&h, "nadia@example.com", "nadia").await;
