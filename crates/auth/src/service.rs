@@ -36,6 +36,12 @@ const IDLE_TIMEOUT_DAYS: i64 = 14;
 /// Absolute hard cap in days, regardless of activity.
 const ABSOLUTE_LIFETIME_DAYS: i64 = 90;
 
+/// How stale `last_used_at` must be before `verify_session` bothers writing
+/// it again. Against a 14-day idle window, a few minutes of slack costs
+/// nothing in accuracy and turns almost every request on an active session
+/// into a read, not a write.
+const LAST_USED_TOUCH_TOLERANCE_MINUTES: i64 = 5;
+
 /// The single definition of "this session still counts": not revoked, still
 /// inside its absolute lifetime, and touched within the idle window. The
 /// login quota, `verify_session`, and `list_sessions` all filter through this
@@ -792,10 +798,21 @@ impl AuthService {
             .await?
             .ok_or(AuthError::Unauthenticated)?;
 
-        // Touch last_used_at so the idle window slides forward from "now"
-        // on every successful check, instead of expiring on a fixed
-        // schedule anchored to session creation.
-        sqlx::query("UPDATE session SET last_used_at = now() WHERE id = $1")
+        // Touch last_used_at so the idle window slides forward, instead of
+        // expiring on a fixed schedule anchored to session creation — but
+        // only when it is actually stale. Without the tolerance clause this
+        // writes on every authenticated request; a session used every few
+        // seconds would generate a write per request for no observable
+        // benefit against a 14-day window.
+        let touch_sql = format!(
+            "UPDATE session SET last_used_at = now() \
+             WHERE id = $1 \
+               AND last_used_at < now() - interval '{LAST_USED_TOUCH_TOLERANCE_MINUTES} minutes'"
+        );
+
+        // Safe to assert: built only from a fixed Rust integer constant,
+        // never from request input.
+        sqlx::query(sqlx::AssertSqlSafe(touch_sql))
             .bind(session.id)
             .execute(&self.pool)
             .await?;

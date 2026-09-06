@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use app_core::new_id;
+use chrono::{DateTime, Utc};
 use auth::{AuthError, AuthService, LoginInput, RegisterInput, VerifyRegistrationInput};
 use mailer::{CaptureMailer, MailError, MailFuture, Mailer, OutgoingMail};
 use testcontainers_modules::{
@@ -110,6 +111,18 @@ async fn pending_count(pool: &db::PgPool, email: &str) -> i64 {
             .await
             .expect("count query runs");
     count
+}
+
+async fn last_used_at(pool: &db::PgPool, email: &str) -> DateTime<Utc> {
+    let (value,): (DateTime<Utc>,) = sqlx::query_as(
+        "SELECT last_used_at FROM session \
+         WHERE account_id = (SELECT id FROM account WHERE email = $1)",
+    )
+    .bind(email)
+    .fetch_one(pool)
+    .await
+    .expect("session row exists");
+    value
 }
 
 async fn account_count(pool: &db::PgPool, email: &str) -> i64 {
@@ -1044,6 +1057,59 @@ async fn list_sessions_omits_a_session_past_its_idle_window() {
     assert!(
         sessions.is_empty(),
         "a session past its idle window must not appear as if it were still usable"
+    );
+}
+
+#[tokio::test]
+async fn verify_session_skips_the_touch_write_within_the_tolerance_window() {
+    let h = harness().await;
+    register_and_verify(&h, "nadia@example.com", "nadia").await;
+    let (_, token) = h
+        .service
+        .login(LoginInput {
+            email: "nadia@example.com".to_string(),
+            password: "correct horse battery staple".to_string(),
+        })
+        .await
+        .expect("login succeeds");
+
+    h.service
+        .verify_session(&token)
+        .await
+        .expect("first verification succeeds");
+    let first_last_used = last_used_at(&h.pool, "nadia@example.com").await;
+
+    h.service
+        .verify_session(&token)
+        .await
+        .expect("second verification succeeds");
+    let second_last_used = last_used_at(&h.pool, "nadia@example.com").await;
+
+    assert_eq!(
+        first_last_used, second_last_used,
+        "a verification inside the tolerance window must not write"
+    );
+
+    // Wind the session back past the tolerance window: the next
+    // verification must touch it again.
+    sqlx::query(
+        "UPDATE session SET last_used_at = now() - interval '10 minutes' \
+         WHERE account_id = (SELECT id FROM account WHERE email = $1)",
+    )
+    .bind("nadia@example.com")
+    .execute(&h.pool)
+    .await
+    .expect("wind-back runs");
+
+    h.service
+        .verify_session(&token)
+        .await
+        .expect("third verification succeeds");
+    let third_last_used = last_used_at(&h.pool, "nadia@example.com").await;
+
+    assert!(
+        third_last_used > second_last_used,
+        "a verification past the tolerance window must touch last_used_at again"
     );
 }
 
