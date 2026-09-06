@@ -380,6 +380,60 @@ async fn registering_a_known_address_looks_identical_and_sends_no_mail() {
 }
 
 #[tokio::test]
+async fn a_second_registration_never_replaces_a_live_one() {
+    let h = harness().await;
+
+    h.service
+        .register(register_input("victoria@example.com", "victoria"))
+        .await
+        .expect("first registration starts");
+    let victorias_code = last_code(&h.mail);
+
+    // An attacker who knows victoria's address tries to claim her pending
+    // registration with a username and password of their own choosing.
+    let attack = RegisterInput {
+        email: "victoria@example.com".to_string(),
+        username: "attacker".to_string(),
+        password: "attacker chosen password".to_string(),
+        display_name: "Attacker".to_string(),
+    };
+    h.service
+        .register(attack)
+        .await
+        .expect("registration reports success either way, matching the already-registered branch");
+
+    assert_eq!(
+        pending_count(&h.pool, "victoria@example.com").await,
+        1,
+        "still exactly one row for the address, untouched by the second call"
+    );
+
+    // Victoria's own code, from her own mailbox, still proves her own
+    // registration — not one an attacker silently swapped in underneath her.
+    let account = h
+        .service
+        .verify_registration(VerifyRegistrationInput {
+            email: "victoria@example.com".to_string(),
+            code: victorias_code,
+        })
+        .await
+        .expect("victoria's original code still verifies her own registration");
+
+    assert_eq!(account.username, "victoria");
+    assert_eq!(account.display_name, "Test User");
+
+    // The attacker's chosen password never became this account's password.
+    let attacker_login = h
+        .service
+        .login(LoginInput {
+            email: "victoria@example.com".to_string(),
+            password: "attacker chosen password".to_string(),
+        })
+        .await;
+    assert!(matches!(attacker_login, Err(AuthError::InvalidCredentials)));
+}
+
+#[tokio::test]
 async fn a_pending_registration_reserves_its_username() {
     let h = harness().await;
 

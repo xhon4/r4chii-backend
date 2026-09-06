@@ -202,27 +202,41 @@ impl AuthService {
         let code_digest = digest_code(&code);
         let pending_id = new_id();
 
-        // Replace rather than reject a repeat registration for the same
-        // address: the common case is someone who lost the first mail, and
-        // making them wait out the window helps nobody. The delete also
-        // invalidates the previous code, which is the ADR's "a new code
-        // invalidates its predecessors" rule.
         let mut tx = self.pool.begin().await?;
+
+        // A live pending row already claims this address. Replacing it here
+        // would let a second caller overwrite a stranger's chosen username
+        // and password before that stranger ever proves they own the
+        // mailbox — the registration-flow equivalent of account takeover.
+        // Leave it untouched and answer exactly like the already-registered
+        // branch above: uniform, silent, no oracle.
+        let live_registration = sqlx::query_as::<_, AccountIdRow>(
+            "SELECT id FROM pending_registration \
+             WHERE email = $1 AND expires_at > now() FOR UPDATE",
+        )
+        .bind(&input.email)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if live_registration.is_some() {
+            tx.commit().await?;
+            return Ok(());
+        }
 
         let recently_mailed = self.mailed_within_cooldown(&mut tx, &input.email).await?;
 
-        // Scoped to the caller's own address, plus any *expired* row holding
-        // the username. Deleting live rows by username would let anyone wipe a
-        // stranger's in-flight registration just by claiming the name they
-        // picked — the squatting problem inverted, and worse, because it
-        // destroys rather than reserves. An expired row holds no such claim:
-        // the availability check above already ignores it, so leaving it in
-        // place would make that check a liar and fail this INSERT against the
-        // table's UNIQUE constraint, stranding the name until someone purges
-        // by hand.
+        // Only expired rows are ever removed here — a live row for this
+        // email already returned above. Scoped to the caller's own address,
+        // plus any *expired* row holding the username: deleting a live row
+        // by username would let anyone wipe a stranger's in-flight
+        // registration just by claiming the name they picked, and an expired
+        // row holds no claim worth keeping — the availability check above
+        // already ignores it, so leaving it in place would make that check a
+        // liar and fail this INSERT against the table's UNIQUE constraint,
+        // stranding the name until someone purges by hand.
         sqlx::query(
             "DELETE FROM pending_registration \
-             WHERE email = $1 OR (username = $2 AND expires_at <= now())",
+             WHERE expires_at <= now() AND (email = $1 OR username = $2)",
         )
         .bind(&input.email)
         .bind(&input.username)
