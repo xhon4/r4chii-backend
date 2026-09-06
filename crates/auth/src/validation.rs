@@ -79,11 +79,22 @@ pub(crate) fn validate_password(password: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
+/// A name meant to render inline next to an avatar in a member list: long
+/// enough for a real name, short enough that layout and storage stay
+/// predictable regardless of what a caller sends.
+const MAX_DISPLAY_NAME_LEN: usize = 32;
+
 pub(crate) fn validate_display_name(display_name: &str) -> Result<(), AuthError> {
     if display_name.trim().is_empty() {
         return Err(AuthError::Validation(
             "display name must not be empty".to_string(),
         ));
+    }
+
+    if display_name.chars().count() > MAX_DISPLAY_NAME_LEN {
+        return Err(AuthError::Validation(format!(
+            "display name must be at most {MAX_DISPLAY_NAME_LEN} characters"
+        )));
     }
 
     Ok(())
@@ -255,6 +266,16 @@ mod tests {
     fn validate_display_name_rejects_empty_or_whitespace_only() {
         assert!(validate_display_name("").is_err());
         assert!(validate_display_name("   ").is_err());
+    }
+
+    #[test]
+    fn validate_display_name_accepts_up_to_the_max_length() {
+        assert!(validate_display_name(&"a".repeat(32)).is_ok());
+    }
+
+    #[test]
+    fn validate_display_name_rejects_over_the_max_length() {
+        assert!(validate_display_name(&"a".repeat(33)).is_err());
     }
 
     #[test]
