@@ -119,6 +119,15 @@ pub(crate) fn validate_avatar_url(avatar_url: &str) -> Result<(), AuthError> {
         )));
     }
 
+    let parsed = url::Url::parse(avatar_url)
+        .map_err(|_| AuthError::Validation("avatar url must be a valid url".to_string()))?;
+
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(AuthError::Validation(
+            "avatar url must use http or https".to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -142,11 +151,13 @@ pub(crate) fn validate_bio(bio: &str) -> Result<(), AuthError> {
 }
 
 pub(crate) fn validate_banner_url(banner_url: &str) -> Result<(), AuthError> {
-    // Same shape as an avatar url: a sanity bound, not URL validation.
-    validate_avatar_url(banner_url).map_err(|_| {
-        AuthError::Validation(format!(
-            "banner url must be non-empty and at most {MAX_AVATAR_URL_LEN} characters"
-        ))
+    // Same shape and rules as an avatar url; only the field name in the
+    // error needs to change to actually name what was rejected.
+    validate_avatar_url(banner_url).map_err(|err| match err {
+        AuthError::Validation(message) => {
+            AuthError::Validation(message.replace("avatar", "banner"))
+        }
+        other => other,
     })
 }
 
@@ -297,8 +308,33 @@ mod tests {
 
     #[test]
     fn validate_avatar_url_accepts_exactly_the_max_length() {
-        let max_len = "a".repeat(MAX_AVATAR_URL_LEN);
+        let prefix = "https://example.com/";
+        let max_len = format!("{prefix}{}", "a".repeat(MAX_AVATAR_URL_LEN - prefix.len()));
+        assert_eq!(max_len.chars().count(), MAX_AVATAR_URL_LEN);
         assert!(validate_avatar_url(&max_len).is_ok());
+    }
+
+    #[test]
+    fn validate_avatar_url_rejects_a_string_that_is_not_a_url() {
+        assert!(validate_avatar_url("not a url at all").is_err());
+    }
+
+    #[test]
+    fn validate_avatar_url_rejects_a_non_http_scheme() {
+        assert!(validate_avatar_url("javascript:alert(1)").is_err());
+        assert!(validate_avatar_url("ftp://example.com/avatar.png").is_err());
+    }
+
+    #[test]
+    fn validate_banner_url_rejects_a_non_http_scheme_with_its_own_field_name() {
+        let error = validate_banner_url("javascript:alert(1)").expect_err("must be rejected");
+        let AuthError::Validation(message) = error else {
+            panic!("expected a validation error");
+        };
+        assert!(
+            message.contains("banner"),
+            "the error should name the field it is about, got: {message}"
+        );
     }
 
     #[test]
