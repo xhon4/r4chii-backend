@@ -7,12 +7,18 @@ mod media;
 mod invite;
 pub mod channel_permissions;
 pub mod permissions;
+mod profile_visibility;
 mod service;
 mod types;
 mod validation;
 
 pub use error::DomainError;
 pub use media::{process_image, ImagePurpose, MediaError, ProcessedImage};
+pub use profile_visibility::{
+    decide_profile_visibility, ProfileFieldExposure, ProfileIdentityExposure, ProfileMediaExposure,
+    ProfilePresenceExposure, ProfileRelationshipExposure, ProfileViewerRelationship,
+    ProfileVisibility, ProfileVisibilityDecision, ProfileVisibilityInput,
+};
 pub use service::{DomainService, ReadAccess, DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT};
 pub use types::{
     BanSummary, BlockSummary, ChannelSummary, CreateChannelInput, CreateGroupDmInput,
