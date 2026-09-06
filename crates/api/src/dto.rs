@@ -52,7 +52,7 @@ impl From<VerifyRegistrationRequest> for auth::VerifyRegistrationInput {
 
 /// The "self" account shape: what a caller sees for their own profile.
 /// Includes `email` — never returned for another account's profile, see
-/// `PublicAccountResponse`.
+/// `ProfileResponse`.
 #[derive(Debug, Serialize)]
 pub struct AccountResponse {
     pub id: Uuid,
@@ -93,38 +93,356 @@ impl From<auth::AccountSummary> for AccountResponse {
     }
 }
 
-/// The "public" account shape: what a caller sees for *someone else's*
-/// profile. Deliberately excludes `email` — privacy as a feature: email is
-/// not for other users to see.
+/// Query string of `GET /accounts/{id}` — `?server_id=` opts into the
+/// per-server nickname/roles block, when the caller and the profile owner
+/// share that server (see `ProfileServerContextResponse`).
+#[derive(Debug, Deserialize)]
+pub struct ProfileQuery {
+    #[serde(default)]
+    pub server_id: Option<Uuid>,
+}
+
+/// The "someone else's profile" shape: what a caller sees for *any* other
+/// account, self included via `GET /accounts/me` mapping separately to
+/// `AccountResponse`. Built ONLY by [`ProfileResponse::build`], from a
+/// `domain::ProfileVisibilityDecision` — there is no `From<ProfileContext>`
+/// or `From<db::profile::ProfileRow>` on purpose, because either would let a
+/// caller construct this response from raw profile data without running it
+/// through the privacy decision first.
 #[derive(Debug, Serialize)]
-pub struct PublicAccountResponse {
+pub struct ProfileResponse {
     pub id: Uuid,
     pub username: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
-    pub bio: Option<String>,
     pub banner_url: Option<String>,
     pub accent_color: Option<String>,
+    pub bio: Option<String>,
     pub pronouns: Option<String>,
+    pub links: Vec<ProfileLinkResponse>,
     pub created_at: DateTime<Utc>,
+    pub presence: ProfilePresenceResponse,
+    pub custom_status: Option<ProfileCustomStatusResponse>,
+    /// Always `null` in M1 — no rich activity payload exists yet (B2).
+    pub activity: Option<()>,
+    /// Always empty in M1 — no badges exist yet (B7).
+    pub badges: Vec<()>,
+    pub relationship: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_context: Option<ProfileServerContextResponse>,
+    pub flags: ProfileFlagsResponse,
 }
 
-impl From<auth::AccountSummary> for PublicAccountResponse {
-    fn from(account: auth::AccountSummary) -> Self {
-        // `email` is dropped here, and this is the only place that decides
-        // so. Adding a field to AccountSummary does NOT expose it publicly
-        // until it is listed below, which is the property worth keeping.
+#[derive(Debug, Serialize)]
+pub struct ProfileLinkResponse {
+    pub label: String,
+    pub url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfilePresenceResponse {
+    /// The persisted manual status (`online`/`idle`/`dnd`/`invisible`), or
+    /// the fixed literal `"offline"` when the decision forces presence
+    /// hidden — never read from the profile row in that case.
+    pub status: String,
+    pub online: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileCustomStatusResponse {
+    pub text: String,
+    pub emoji: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileServerContextResponse {
+    pub server_id: Uuid,
+    pub nickname: Option<String>,
+    pub roles: Vec<ProfileServerRoleResponse>,
+    pub joined_at: DateTime<Utc>,
+}
+
+/// Deliberately not the full `RoleResponse` (permissions/position have no
+/// reason to appear in a profile popout) — the M1 contract asks for exactly
+/// `id`/`name`/`color`.
+#[derive(Debug, Serialize)]
+pub struct ProfileServerRoleResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileFlagsResponse {
+    pub deleted: bool,
+    /// Always `false` — there is no system-account concept yet.
+    pub system: bool,
+}
+
+impl ProfileResponse {
+    /// The only constructor. Takes the already-decided
+    /// `domain::ProfileVisibilityDecision` and maps each field strictly
+    /// according to its exposure — never the raw `ctx.profile` value
+    /// directly. `online` is the realtime hub's answer for this account;
+    /// passing a real value when `decision.presence` is `ForcedOffline` is
+    /// harmless because that branch never reads it.
+    pub fn build(
+        ctx: domain::ProfileContext,
+        decision: domain::ProfileVisibilityDecision,
+        online: bool,
+        requested_server_id: Option<Uuid>,
+    ) -> Self {
+        let domain::ProfileContext {
+            profile,
+            server_context,
+            ..
+        } = ctx;
+
+        let display_name = match decision.identity {
+            domain::ProfileIdentityExposure::Tombstone => "Deleted User".to_string(),
+            domain::ProfileIdentityExposure::Visible => profile.display_name,
+        };
+
+        let (avatar_url, banner_url, accent_color) = match decision.media {
+            domain::ProfileMediaExposure::Actual => {
+                (profile.avatar_url, profile.banner_url, profile.accent_color)
+            }
+            domain::ProfileMediaExposure::Default => (None, None, None),
+        };
+
+        let (bio, pronouns, links) = match decision.bio_pronouns_and_links {
+            domain::ProfileFieldExposure::Visible => (
+                profile.bio,
+                profile.pronouns,
+                profile
+                    .links
+                    .into_iter()
+                    .map(|link| ProfileLinkResponse {
+                        label: link.label,
+                        url: link.url,
+                    })
+                    .collect(),
+            ),
+            domain::ProfileFieldExposure::Hidden => (None, None, Vec::new()),
+        };
+
+        let presence = match decision.presence {
+            domain::ProfilePresenceExposure::Real => ProfilePresenceResponse {
+                status: profile.status,
+                online,
+            },
+            domain::ProfilePresenceExposure::ForcedOffline => ProfilePresenceResponse {
+                status: "offline".to_string(),
+                online: false,
+            },
+        };
+
+        let custom_status = match decision.custom_status {
+            domain::ProfileFieldExposure::Visible => profile.custom_status.map(|text| {
+                ProfileCustomStatusResponse {
+                    text,
+                    emoji: profile.custom_emoji,
+                    expires_at: profile.custom_expires_at,
+                }
+            }),
+            domain::ProfileFieldExposure::Hidden => None,
+        };
+
+        let relationship = match decision.relationship {
+            domain::ProfileRelationshipExposure::SelfView => "self",
+            domain::ProfileRelationshipExposure::Friend => "friend",
+            domain::ProfileRelationshipExposure::NoRelationship => "none",
+            domain::ProfileRelationshipExposure::Blocked => "blocked",
+            // `Minimum` and `None` both collapse to "none" on purpose: the
+            // domain decision already refuses to disclose an inbound block
+            // or its direction (see `profile_visibility.rs`), and leaking
+            // that distinction in the relationship string would undo it.
+            domain::ProfileRelationshipExposure::Minimum => "none",
+            domain::ProfileRelationshipExposure::None => "none",
+        };
+
+        let server_context = match (decision.server_context, requested_server_id) {
+            (domain::ProfileFieldExposure::Visible, Some(server_id)) => {
+                server_context.map(|ctx| ProfileServerContextResponse {
+                    server_id,
+                    nickname: ctx.nickname,
+                    roles: ctx
+                        .roles
+                        .into_iter()
+                        .map(|role| ProfileServerRoleResponse {
+                            id: role.id,
+                            name: role.name,
+                            color: role.color,
+                        })
+                        .collect(),
+                    joined_at: ctx.joined_at,
+                })
+            }
+            _ => None,
+        };
+
         Self {
-            id: account.id,
-            username: account.username,
-            display_name: account.display_name,
-            avatar_url: account.avatar_url,
-            bio: account.bio,
-            banner_url: account.banner_url,
-            accent_color: account.accent_color,
-            pronouns: account.pronouns,
-            created_at: account.created_at,
+            id: profile.id,
+            username: profile.username,
+            display_name,
+            avatar_url,
+            banner_url,
+            accent_color,
+            bio,
+            pronouns,
+            links,
+            created_at: profile.created_at,
+            presence,
+            custom_status,
+            activity: None,
+            badges: Vec::new(),
+            relationship,
+            server_context,
+            flags: ProfileFlagsResponse {
+                deleted: decision.identity == domain::ProfileIdentityExposure::Tombstone,
+                system: false,
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod profile_response_tests {
+    use super::ProfileResponse;
+    use chrono::Utc;
+
+    /// A profile with every masked field populated (non-null custom status,
+    /// a server context), so a mapper that ignores the decision and reads
+    /// the raw row anyway is caught red-handed instead of coincidentally
+    /// passing because the field happened to be empty.
+    fn populated_context() -> domain::ProfileContext {
+        domain::ProfileContext {
+            profile: db::profile::ProfileRow {
+                id: app_core::new_id(),
+                username: "alice".to_string(),
+                display_name: "Alice".to_string(),
+                avatar_url: Some("https://example.com/a.png".to_string()),
+                bio: Some("hi".to_string()),
+                banner_url: Some("https://example.com/b.png".to_string()),
+                accent_color: Some("#4A90E2".to_string()),
+                pronouns: Some("she/her".to_string()),
+                created_at: Utc::now(),
+                status: "dnd".to_string(),
+                custom_status: Some("in a meeting".to_string()),
+                custom_emoji: Some("📞".to_string()),
+                custom_expires_at: None,
+                theme: "{}".to_string(),
+                vis_bio: "public".to_string(),
+                vis_communities: "public".to_string(),
+                vis_friends: "public".to_string(),
+                deleted_at: None,
+                links: vec![db::profile::ProfileLinkRow {
+                    id: app_core::new_id(),
+                    label: "github".to_string(),
+                    url: "https://github.com/alice".to_string(),
+                    position: 0,
+                }],
+            },
+            relationship: domain::ProfileViewerRelationship::Friend,
+            caller_blocked_owner: false,
+            owner_blocked_caller: false,
+            server_context: Some(db::profile::ServerContextRow {
+                nickname: Some("ally".to_string()),
+                joined_at: Utc::now(),
+                roles: vec![db::server_role::ServerRoleRow {
+                    id: app_core::new_id(),
+                    server_id: app_core::new_id(),
+                    name: "admin".to_string(),
+                    color: Some("#FF0000".to_string()),
+                    permissions: 0,
+                    position: 0,
+                    is_default: false,
+                    created_at: Utc::now(),
+                    mentionable: false,
+                }],
+            }),
+            has_shared_server_context: true,
+        }
+    }
+
+    fn visible_decision() -> domain::ProfileVisibilityDecision {
+        domain::decide_profile_visibility(domain::ProfileVisibilityInput {
+            relationship: domain::ProfileViewerRelationship::Friend,
+            vis_bio: domain::ProfileVisibility::Public,
+            vis_communities: domain::ProfileVisibility::Public,
+            vis_friends: domain::ProfileVisibility::Public,
+            caller_blocked_owner: false,
+            owner_blocked_caller: false,
+            has_shared_server_context: true,
+            is_deleted: false,
+        })
+    }
+
+    #[test]
+    fn an_inbound_block_masks_custom_status_and_server_context_even_with_real_data() {
+        let ctx = populated_context();
+        let decision = domain::decide_profile_visibility(domain::ProfileVisibilityInput {
+            relationship: domain::ProfileViewerRelationship::Friend,
+            vis_bio: domain::ProfileVisibility::Public,
+            vis_communities: domain::ProfileVisibility::Public,
+            vis_friends: domain::ProfileVisibility::Public,
+            caller_blocked_owner: false,
+            owner_blocked_caller: true,
+            has_shared_server_context: true,
+            is_deleted: false,
+        });
+
+        // `online: true` on purpose — a real live connection — to prove the
+        // mapper does not leak it once the decision forces presence hidden.
+        let response = ProfileResponse::build(ctx, decision, true, Some(app_core::new_id()));
+
+        assert_eq!(response.presence.status, "offline");
+        assert!(!response.presence.online);
+        assert!(response.custom_status.is_none());
+        assert!(response.server_context.is_none());
+        assert_eq!(response.relationship, "none");
+    }
+
+    #[test]
+    fn a_deleted_account_masks_custom_status_and_server_context_even_with_real_data() {
+        let ctx = populated_context();
+        let decision = domain::decide_profile_visibility(domain::ProfileVisibilityInput {
+            relationship: domain::ProfileViewerRelationship::Friend,
+            vis_bio: domain::ProfileVisibility::Public,
+            vis_communities: domain::ProfileVisibility::Public,
+            vis_friends: domain::ProfileVisibility::Public,
+            caller_blocked_owner: false,
+            owner_blocked_caller: false,
+            has_shared_server_context: true,
+            is_deleted: true,
+        });
+
+        let response = ProfileResponse::build(ctx, decision, true, Some(app_core::new_id()));
+
+        assert_eq!(response.display_name, "Deleted User");
+        assert_eq!(response.presence.status, "offline");
+        assert!(!response.presence.online);
+        assert!(response.custom_status.is_none());
+        assert!(response.server_context.is_none());
+        assert!(response.avatar_url.is_none());
+        assert_eq!(response.relationship, "none");
+        assert!(response.flags.deleted);
+    }
+
+    #[test]
+    fn a_visible_decision_carries_the_real_custom_status_and_server_context_through() {
+        let ctx = populated_context();
+        let server_id = app_core::new_id();
+
+        let response = ProfileResponse::build(ctx, visible_decision(), true, Some(server_id));
+
+        let custom_status = response.custom_status.expect("custom status is visible");
+        assert_eq!(custom_status.text, "in a meeting");
+        let server_context = response.server_context.expect("server context is visible");
+        assert_eq!(server_context.server_id, server_id);
+        assert_eq!(server_context.nickname.as_deref(), Some("ally"));
+        assert!(response.presence.online);
     }
 }
 
@@ -428,7 +746,7 @@ pub struct ChannelListResponse {
 }
 
 /// One member of a server: their public profile plus the role they hold
-/// there. Shares `PublicAccountResponse`'s privacy stance — no `email`,
+/// there. Shares `ProfileResponse`'s privacy stance — no `email`,
 /// because this is someone else's profile, not the caller's own.
 #[derive(Debug, Serialize)]
 pub struct ServerMemberResponse {

@@ -155,7 +155,7 @@ pub async fn update_invite_code(
 /// A server's member: their `membership.role` joined with the public-safe
 /// columns of their `account` row. Deliberately no `email` — the
 /// caller's-own-profile-only field (see `api`'s `AccountResponse` vs
-/// `PublicAccountResponse` split); a member list is other people's profiles.
+/// `ProfileResponse` split); a member list is other people's profiles.
 #[derive(sqlx::FromRow)]
 pub struct ServerMemberRow {
     pub account_id: Uuid,

@@ -161,6 +161,20 @@ pub enum ReadAccess {
     Public,
 }
 
+/// Every fact `decide_profile_visibility` needs about one profile view,
+/// gathered but not yet judged. Carries the raw `ProfileRow` — a caller
+/// must run it through `decide_profile_visibility` before mapping any of
+/// this into a response; nothing here is safe to serialize directly.
+#[derive(Debug, Clone)]
+pub struct ProfileContext {
+    pub profile: db::profile::ProfileRow,
+    pub relationship: crate::profile_visibility::ProfileViewerRelationship,
+    pub caller_blocked_owner: bool,
+    pub owner_blocked_caller: bool,
+    pub server_context: Option<db::profile::ServerContextRow>,
+    pub has_shared_server_context: bool,
+}
+
 impl From<db::message::MessageRow> for MessageSummary {
     fn from(row: db::message::MessageRow) -> Self {
         // Soft-deleted rows stay in results but never carry their content
@@ -2374,6 +2388,73 @@ impl DomainService {
     pub async fn blocked_account_ids(&self, account_id: Uuid) -> Result<Vec<Uuid>, DomainError> {
         let rows = db::block::list_for_account(&self.pool, account_id).await?;
         Ok(rows.into_iter().map(|row| row.blocked_account_id).collect())
+    }
+
+    /// Gathers every fact `decide_profile_visibility` needs for `caller_id`
+    /// viewing `target_id`'s profile — relationship, both directional
+    /// blocks, and (when `server_id` is given) whether the two share that
+    /// server. Makes no visibility decision itself: that judgment belongs
+    /// solely to `decide_profile_visibility`, which the caller runs
+    /// separately over the result. Deliberately does not touch realtime
+    /// presence — `domain` has no dependency on `realtime` (it's the other
+    /// way around), so a caller with access to both `DomainService` and
+    /// `realtime::Hub` resolves presence itself.
+    pub async fn get_profile_context(
+        &self,
+        caller_id: Uuid,
+        target_id: Uuid,
+        server_id: Option<Uuid>,
+    ) -> Result<ProfileContext, DomainError> {
+        let mut profiles = db::profile::get_profiles_bulk(&self.pool, &[target_id]).await?;
+        let profile = profiles.pop().ok_or(DomainError::AccountNotFound)?;
+
+        let relationship = if caller_id == target_id {
+            crate::profile_visibility::ProfileViewerRelationship::SelfView
+        } else {
+            let (low, high) = if caller_id < target_id {
+                (caller_id, target_id)
+            } else {
+                (target_id, caller_id)
+            };
+            match db::friendship::find_by_pair(&self.pool, low, high).await? {
+                Some(row) if row.status == "accepted" => {
+                    crate::profile_visibility::ProfileViewerRelationship::Friend
+                }
+                _ => crate::profile_visibility::ProfileViewerRelationship::None,
+            }
+        };
+
+        let (caller_blocked_owner, owner_blocked_caller) = if caller_id == target_id {
+            (false, false)
+        } else {
+            (
+                db::block::is_blocking(&self.pool, caller_id, target_id).await?,
+                db::block::is_blocking(&self.pool, target_id, caller_id).await?,
+            )
+        };
+
+        let (server_context, has_shared_server_context) = match server_id {
+            Some(server_id) => {
+                let target_context =
+                    db::profile::get_server_context(&self.pool, server_id, target_id).await?;
+                let caller_is_member =
+                    db::channel::find_membership(&self.pool, server_id, caller_id)
+                        .await?
+                        .is_some();
+                let shared = target_context.is_some() && caller_is_member;
+                (target_context, shared)
+            }
+            None => (None, false),
+        };
+
+        Ok(ProfileContext {
+            profile,
+            relationship,
+            caller_blocked_owner,
+            owner_blocked_caller,
+            server_context,
+            has_shared_server_context,
+        })
     }
 
     /// Shared channel-access gate for every message method: a caller may

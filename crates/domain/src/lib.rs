@@ -19,7 +19,9 @@ pub use profile_visibility::{
     ProfilePresenceExposure, ProfileRelationshipExposure, ProfileViewerRelationship,
     ProfileVisibility, ProfileVisibilityDecision, ProfileVisibilityInput,
 };
-pub use service::{DomainService, ReadAccess, DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT};
+pub use service::{
+    DomainService, ProfileContext, ReadAccess, DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT,
+};
 pub use types::{
     BanSummary, BlockSummary, ChannelSummary, CreateChannelInput, CreateGroupDmInput,
     CreateRoleInput, CreateServerInput, CreateThreadInput, EditMessageInput, ExportJobSummary,

@@ -214,7 +214,7 @@ pub struct TimeoutInput {
 /// A member of a server: their public profile plus the role they hold
 /// there. Never carries `email` — that stays a caller's-own-profile field,
 /// the same split the `api` crate draws between `AccountResponse` and
-/// `PublicAccountResponse`.
+/// `ProfileResponse`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerMemberSummary {
     pub account_id: Uuid,

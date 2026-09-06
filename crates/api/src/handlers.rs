@@ -22,7 +22,7 @@ use crate::{
         CreateServerRequest, CreateThreadRequest, EditMessageRequest, ExportJobResponse,
         FriendshipListResponse, FriendshipResponse,
         LoginRequest, LoginResponse, MemberRolesResponse, MessageListQuery, MessageListResponse,
-        MessageResponse, MessageSearchQuery, PublicAccountResponse, RegisterRequest,
+        MessageResponse, MessageSearchQuery, ProfileQuery, ProfileResponse, RegisterRequest,
         ReorderRolesRequest,
         ResendCodeRequest, RoleListResponse, RoleResponse, SendFriendRequestRequest,
         SendMessageRequest, ServerListResponse, ServerMemberListResponse, ServerMemberResponse,
@@ -110,17 +110,58 @@ pub async fn login(
     Ok((StatusCode::CREATED, jar, Json(response)))
 }
 
-/// Someone else's profile — public shape, no email. Still requires
-/// authentication like every other route in this API (there is no
-/// anonymous route except register/login), even though the response
-/// content isn't caller-specific.
+/// Someone else's profile, filtered through `decide_profile_visibility`
+/// (A4) according to the caller's relationship to the target: friendship,
+/// either direction of block, and whether the account is deleted. Still
+/// requires authentication like every other route in this API (there is no
+/// anonymous route except register/login) — an anonymous public read path
+/// is C1, not decided yet.
+///
+/// This is the only place that calls `decide_profile_visibility` and maps
+/// its result to a response; `get_profile_context` below only gathers the
+/// facts the decision needs, it does not judge them.
 pub async fn get_account(
     State(state): State<AppState>,
-    _caller: AuthenticatedUser,
+    AuthenticatedUser(context): AuthenticatedUser,
     Path(account_id): Path<Uuid>,
-) -> Result<Json<PublicAccountResponse>, ApiError> {
-    let account = state.auth.get_account(account_id).await?;
-    Ok(Json(account.into()))
+    query: Result<Query<ProfileQuery>, QueryRejection>,
+) -> Result<Json<ProfileResponse>, ApiError> {
+    let Query(query) = query?;
+    let ctx = state
+        .domain
+        .get_profile_context(context.account_id, account_id, query.server_id)
+        .await?;
+
+    let vis_input = domain::ProfileVisibilityInput {
+        relationship: ctx.relationship,
+        vis_bio: domain::ProfileVisibility::from_db(&ctx.profile.vis_bio),
+        vis_communities: domain::ProfileVisibility::from_db(&ctx.profile.vis_communities),
+        vis_friends: domain::ProfileVisibility::from_db(&ctx.profile.vis_friends),
+        caller_blocked_owner: ctx.caller_blocked_owner,
+        owner_blocked_caller: ctx.owner_blocked_caller,
+        has_shared_server_context: ctx.has_shared_server_context,
+        is_deleted: ctx.profile.deleted_at.is_some(),
+    };
+    let decision = domain::decide_profile_visibility(vis_input);
+
+    let online = if decision.presence == domain::ProfilePresenceExposure::Real {
+        state
+            .realtime
+            .presence_snapshot(&[account_id])
+            .await
+            .get(&account_id)
+            .copied()
+            == Some(realtime::PresenceStatus::Online)
+    } else {
+        false
+    };
+
+    Ok(Json(ProfileResponse::build(
+        ctx,
+        decision,
+        online,
+        query.server_id,
+    )))
 }
 
 /// The caller's own profile — self shape, includes email. This is the only

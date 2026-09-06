@@ -13,10 +13,12 @@ use testcontainers_modules::{
     testcontainers::{runners::AsyncRunner, ImageExt},
 };
 use tower::ServiceExt;
+use uuid::Uuid;
 
 async fn test_app() -> (
     axum::Router,
     mailer::CaptureMailer,
+    realtime::Hub,
     testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
 ) {
     let container = Postgres::default()
@@ -47,8 +49,9 @@ async fn test_app() -> (
         domain: domain.clone(),
         realtime: realtime::Hub::new(domain),
     };
+    let hub = state.realtime.clone();
 
-    (api::router(state), mail, container)
+    (api::router(state), mail, hub, container)
 }
 
 // Same rationale as crates/api/tests/auth_routes.rs: the register/login
@@ -184,7 +187,7 @@ async fn register_and_login(
 
 #[tokio::test]
 async fn viewing_another_accounts_public_profile_never_includes_email() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
 
     let (alice_id, _alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
@@ -208,9 +211,223 @@ async fn viewing_another_accounts_public_profile_never_includes_email() {
     );
 }
 
+/// Direct connection to the same test container's database, for setup that
+/// has no HTTP path yet (there is no delete-account endpoint in M1 — only
+/// the `deleted_at` column A2 added).
+async fn direct_pool(
+    container: &testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+) -> db::PgPool {
+    let host = container.get_host().await.expect("container host");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("container port");
+    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+    db::build_pool(&database_url).await.expect("pool connects")
+}
+
+#[tokio::test]
+async fn get_account_for_yourself_by_id_reports_self_relationship() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+
+    let response = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{alice_id}"),
+            &alice_token,
+        ))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["relationship"], "self");
+}
+
+#[tokio::test]
+async fn get_account_with_no_relationship_reports_none() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (alice_id, _alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (_bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    let response = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{alice_id}"),
+            &bob_token,
+        ))
+        .await
+        .expect("request succeeds");
+
+    let body = body_json(response).await;
+    assert_eq!(body["relationship"], "none");
+}
+
+#[tokio::test]
+async fn get_account_after_a_reciprocal_friend_request_reports_friend() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    app.clone()
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/friends",
+            &alice_token,
+            json!({ "account_id": bob_id }),
+        ))
+        .await
+        .expect("request succeeds");
+    app.clone()
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/friends",
+            &bob_token,
+            json!({ "account_id": alice_id }),
+        ))
+        .await
+        .expect("reciprocal request accepts");
+
+    let response = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{alice_id}"),
+            &bob_token,
+        ))
+        .await
+        .expect("request succeeds");
+
+    let body = body_json(response).await;
+    assert_eq!(body["relationship"], "friend");
+}
+
+#[tokio::test]
+async fn get_account_you_blocked_reports_blocked_relationship() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    app.clone()
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/blocks",
+            &alice_token,
+            json!({ "account_id": bob_id }),
+        ))
+        .await
+        .expect("block request succeeds");
+
+    let response = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{bob_id}"),
+            &alice_token,
+        ))
+        .await
+        .expect("request succeeds");
+
+    let body = body_json(response).await;
+    assert_eq!(body["relationship"], "blocked");
+}
+
+/// The sharpest case: bob blocked alice (inbound from alice's point of
+/// view) AND bob has a real live gateway connection registered. The
+/// response must still show alice a fully masked, offline profile — proof
+/// that the mapping layer honors `decide_profile_visibility`'s
+/// `ForcedOffline`/`Hidden` verdict rather than reading the real presence
+/// and profile data it has on hand.
+#[tokio::test]
+async fn an_inbound_block_hides_presence_custom_status_and_relationship_even_with_a_live_connection(
+) {
+    let (app, mail, hub, _container) = test_app().await;
+    let (alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    app.clone()
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/blocks",
+            &bob_token,
+            json!({ "account_id": alice_id }),
+        ))
+        .await
+        .expect("block request succeeds");
+
+    let bob_uuid: Uuid = bob_id.parse().expect("bob id is a uuid");
+    let (_handle, _receiver) = hub.register(bob_uuid).await;
+
+    let response = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{bob_id}"),
+            &alice_token,
+        ))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["relationship"], "none");
+    assert_eq!(body["presence"]["status"], "offline");
+    assert_eq!(body["presence"]["online"], false);
+    assert!(body["custom_status"].is_null());
+    assert!(
+        body.get("server_context").is_none(),
+        "server_context must not appear for an inbound block"
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_account_is_returned_as_a_tombstone_not_a_404() {
+    let (app, mail, hub, container) = test_app().await;
+    let (_alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    let bob_uuid: Uuid = bob_id.parse().expect("bob id is a uuid");
+    let (_handle, _receiver) = hub.register(bob_uuid).await;
+
+    let pool = direct_pool(&container).await;
+    sqlx::query("UPDATE account SET deleted_at = now() WHERE id = $1")
+        .bind(bob_uuid)
+        .execute(&pool)
+        .await
+        .expect("deleted_at updates");
+
+    let response = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{bob_id}"),
+            &alice_token,
+        ))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a deleted account is a tombstone, not a 404 — it must not break message history"
+    );
+    let body = body_json(response).await;
+    assert_eq!(body["display_name"], "Deleted User");
+    assert_eq!(body["username"], "bob", "username survives so /users/:username still resolves");
+    assert_eq!(body["relationship"], "none");
+    assert_eq!(body["presence"]["status"], "offline");
+    assert_eq!(body["presence"]["online"], false);
+    assert!(body["custom_status"].is_null());
+    assert!(body.get("server_context").is_none());
+    assert_eq!(body["flags"]["deleted"], true);
+}
+
 #[tokio::test]
 async fn get_own_account_returns_the_self_shape_including_email() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
 
     let (_carol_id, carol_token) =
         register_and_login(&app, &mail, "carol@example.com", "carol").await;
@@ -228,7 +445,7 @@ async fn get_own_account_returns_the_self_shape_including_email() {
 
 #[tokio::test]
 async fn get_account_for_a_nonexistent_id_returns_404() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
 
     let (_dave_id, dave_token) = register_and_login(&app, &mail, "dave@example.com", "dave").await;
 
@@ -248,7 +465,7 @@ async fn get_account_for_a_nonexistent_id_returns_404() {
 
 #[tokio::test]
 async fn patch_accounts_me_updates_only_the_calling_account() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
 
     let (_erin_id, erin_token) = register_and_login(&app, &mail, "erin@example.com", "erin").await;
     let (frank_id, frank_token) = register_and_login(&app, &mail, "frank@example.com", "frank").await;
@@ -294,7 +511,7 @@ async fn patch_accounts_me_updates_only_the_calling_account() {
 
 #[tokio::test]
 async fn patch_accounts_me_updating_one_field_leaves_the_others_unchanged() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
 
     let (_grace_id, grace_token) =
         register_and_login(&app, &mail, "grace@example.com", "grace").await;
@@ -318,7 +535,7 @@ async fn patch_accounts_me_updating_one_field_leaves_the_others_unchanged() {
 
 #[tokio::test]
 async fn patch_accounts_me_to_a_taken_username_returns_409_and_leaves_the_caller_unmodified() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
 
     let (_heidi_id, _heidi_token) =
         register_and_login(&app, &mail, "heidi@example.com", "heidi").await;
@@ -350,7 +567,7 @@ async fn patch_accounts_me_to_a_taken_username_returns_409_and_leaves_the_caller
 
 #[tokio::test]
 async fn get_accounts_id_with_no_token_returns_401() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
 
     let (someone_id, _token) = register_and_login(&app, &mail, "jack@example.com", "jack").await;
 
@@ -369,7 +586,7 @@ async fn get_accounts_id_with_no_token_returns_401() {
 
 #[tokio::test]
 async fn patch_accounts_me_with_no_token_returns_401() {
-    let (app, _mail, _container) = test_app().await;
+    let (app, _mail, _hub, _container) = test_app().await;
 
     let response = app
         .oneshot(json_request(
@@ -391,7 +608,7 @@ async fn patch_accounts_me_with_no_token_returns_401() {
 /// into the same `None`, so a bio could be set and never removed.
 #[tokio::test]
 async fn patch_accounts_me_tells_an_absent_field_apart_from_an_explicit_null() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
 
     let (_heidi_id, heidi_token) = register_and_login(&app, &mail, "heidi@example.com", "heidi").await;
 
@@ -457,7 +674,7 @@ async fn patch_accounts_me_tells_an_absent_field_apart_from_an_explicit_null() {
 
 #[tokio::test]
 async fn patch_accounts_me_rejects_an_invalid_accent_color_and_writes_nothing() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
 
     let (_ivan_id, ivan_token) = register_and_login(&app, &mail, "ivan@example.com", "ivan").await;
 

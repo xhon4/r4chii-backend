@@ -112,3 +112,21 @@ pub async fn exists_either_direction(
     .fetch_one(executor)
     .await
 }
+
+/// Whether `blocker_account_id` has blocked `blocked_account_id` —
+/// the directional counterpart to `exists_either_direction`, for callers
+/// that must tell which side placed the block rather than just that one
+/// exists.
+pub async fn is_blocking(
+    executor: impl PgExecutor<'_>,
+    blocker_account_id: Uuid,
+    blocked_account_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM block WHERE blocker_account_id = $1 AND blocked_account_id = $2)",
+    )
+    .bind(blocker_account_id)
+    .bind(blocked_account_id)
+    .fetch_one(executor)
+    .await
+}

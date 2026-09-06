@@ -42,10 +42,7 @@ pub struct AccountSummary {
     pub accent_color: Option<String>,
     /// `she/her` shape: one slash, 1-5 letters a side.
     pub pronouns: Option<String>,
-    /// Needed to build the public profile shape (`id`, `username`,
-    /// `display_name`, `avatar_url`, `created_at` — no email), which the
-    /// `api` crate maps this same `AccountSummary` into. Doubles as the
-    /// global "member since".
+    /// Doubles as the global "member since", surfaced on `AccountResponse`.
     pub created_at: DateTime<Utc>,
     /// When the address was proven. `None` only for accounts predating
     /// required email verification — after that, an account cannot exist without a proven address,
