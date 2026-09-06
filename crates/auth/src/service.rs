@@ -280,14 +280,17 @@ impl AuthService {
             .execute(&mut *tx)
             .await?;
 
-        tx.commit().await?;
-
-        // The row (and its fresh code) is committed either way; only the mail
-        // is withheld inside the cooldown. Doing it the other way round would
-        // leave the caller holding a code that no longer works.
+        // Sent before commit, not after: a failed delivery must not leave a
+        // live row behind that nobody received the code for, backed by a
+        // cooldown that would silently withhold the next attempt too. On
+        // failure `?` returns before `tx.commit()`, so the transaction drops
+        // and rolls back — the caller sees the error and can retry at once,
+        // with nothing committed to be in the way.
         if !recently_mailed {
             self.send_code(&email, &code).await?;
         }
+
+        tx.commit().await?;
 
         Ok(())
     }
@@ -332,13 +335,19 @@ impl AuthService {
             .execute(&mut *tx)
             .await?;
 
-        tx.commit().await?;
-
         if result.rows_affected() == 0 {
+            // Nothing to resend to. Nothing was written either — this
+            // commits an empty transaction, which is harmless.
+            tx.commit().await?;
             return Ok(());
         }
 
+        // Sent before commit, not after: on failure `?` returns before
+        // `tx.commit()`, rolling back the rotation. The previous code, never
+        // replaced by one nobody received, is left intact and still usable.
         self.send_code(&email, &code).await?;
+
+        tx.commit().await?;
 
         Ok(())
     }

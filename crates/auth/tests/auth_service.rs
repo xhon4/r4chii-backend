@@ -1,11 +1,45 @@
 use std::sync::Arc;
 
 use auth::{AuthError, AuthService, LoginInput, RegisterInput, VerifyRegistrationInput};
-use mailer::CaptureMailer;
+use mailer::{CaptureMailer, MailError, MailFuture, Mailer, OutgoingMail};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{runners::AsyncRunner, ImageExt},
 };
+
+/// Always fails delivery, to prove a failed send leaves no trace behind
+/// rather than a committed row nobody received the code for.
+struct FailingMailer;
+
+impl Mailer for FailingMailer {
+    fn send<'a>(&'a self, _mail: OutgoingMail) -> MailFuture<'a> {
+        Box::pin(async move {
+            Err(MailError::Delivery(Box::new(std::io::Error::other(
+                "simulated delivery failure",
+            ))))
+        })
+    }
+}
+
+async fn pool_only() -> (
+    db::PgPool,
+    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+) {
+    let container = Postgres::default()
+        .with_tag("16")
+        .start()
+        .await
+        .expect("postgres container starts");
+    let host = container.get_host().await.expect("container host");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("container port");
+    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+    let pool = db::build_pool(&database_url).await.expect("pool connects");
+    db::run_migrations(&pool).await.expect("migrations run");
+    (pool, container)
+}
 
 struct Harness {
     service: AuthService,
@@ -497,6 +531,67 @@ async fn email_case_never_creates_a_duplicate_account_and_still_logs_in() {
         .await
         .expect("login is case-insensitive on email");
     assert!(!token.is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_delivery_leaves_no_row_and_no_cooldown_behind() {
+    let (pool, _container) = pool_only().await;
+    let service = AuthService::new(pool.clone(), Arc::new(FailingMailer));
+
+    let result = service.register(register_input("zoe@example.com", "zoe")).await;
+    assert!(matches!(result, Err(AuthError::MailDelivery(_))));
+
+    // No half-committed row: a failed send must not leave behind a live code
+    // nobody received, backed by a cooldown that blocks an immediate retry.
+    assert_eq!(pending_count(&pool, "zoe@example.com").await, 0);
+
+    // A retry right away succeeds — nothing committed, so no cooldown to hit.
+    let working_service = AuthService::new(pool.clone(), Arc::new(CaptureMailer::new()));
+    working_service
+        .register(register_input("zoe@example.com", "zoe"))
+        .await
+        .expect("a retry with a working mailer succeeds immediately");
+    assert_eq!(pending_count(&pool, "zoe@example.com").await, 1);
+}
+
+#[tokio::test]
+async fn a_failed_resend_leaves_the_previous_code_intact() {
+    let (pool, _container) = pool_only().await;
+    let mail = CaptureMailer::new();
+    let service = AuthService::new(pool.clone(), Arc::new(mail.clone()));
+
+    service
+        .register(register_input("yara@example.com", "yara"))
+        .await
+        .expect("registration starts");
+    let original_code = last_code(&mail);
+
+    // Past the resend cooldown, so the failing path below actually reaches
+    // the rotate-and-send step instead of short-circuiting on cooldown.
+    sqlx::query(
+        "UPDATE pending_registration SET expires_at = now() + interval '5 minutes' WHERE email = $1",
+    )
+    .bind("yara@example.com")
+    .execute(&pool)
+    .await
+    .expect("cooldown wind-back runs");
+
+    let failing_service = AuthService::new(pool.clone(), Arc::new(FailingMailer));
+    let result = failing_service
+        .resend_verification_code("yara@example.com")
+        .await;
+    assert!(matches!(result, Err(AuthError::MailDelivery(_))));
+
+    // The rotation rolled back with the failed send: the original code,
+    // never delivered a replacement, still verifies.
+    let account = service
+        .verify_registration(VerifyRegistrationInput {
+            email: "yara@example.com".to_string(),
+            code: original_code,
+        })
+        .await
+        .expect("the original code still verifies after a failed resend");
+    assert_eq!(account.username, "yara");
 }
 
 #[tokio::test]
