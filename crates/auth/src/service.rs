@@ -179,22 +179,21 @@ impl AuthService {
         // stored value below — never `input.email` again in this function.
         let email = normalize_email(&input.email);
 
-        // Hash before the existence check, not after. Skipping the argon2 work
-        // on the "already registered" path would make that response measurably
-        // faster and hand back the oracle the identical response text just
-        // took away.
-        let password_hash = hash_password(&input.password)?;
-
         // Username and email are treated differently on purpose.
         //
         // A username clash is reported plainly: usernames are public — they
         // show up in every member list — so saying "that one is taken" reveals
         // nothing an attacker could not read off a channel, and staying silent
-        // would leave someone waiting for a mail that is never coming.
+        // would leave someone waiting for a mail that is never coming. Because
+        // that response is already distinguishable by content, there is no
+        // timing oracle to protect here — so this check runs before the
+        // argon2 hash below, not after: an unauthenticated caller hammering
+        // known-taken usernames should not get to spend that cost every time.
         //
         // An email clash is silent, because *that* is the private fact. Saying
         // "already registered" would turn this endpoint into the enumeration
-        // oracle that login is careful never to be.
+        // oracle that login is careful never to be — which is exactly why
+        // its check, below, stays *after* the hash.
         let username_taken = sqlx::query_as::<_, AccountIdRow>(
             "SELECT id FROM account WHERE username = $1 \
              UNION ALL \
@@ -207,6 +206,12 @@ impl AuthService {
         if username_taken.is_some() {
             return Err(AuthError::UsernameTaken);
         }
+
+        // Hash before the existence check, not after. Skipping the argon2
+        // work on the "already registered" path would make that response
+        // measurably faster and hand back the oracle the identical response
+        // text just took away.
+        let password_hash = hash_password(&input.password)?;
 
         let email_taken = sqlx::query_as::<_, AccountIdRow>("SELECT id FROM account WHERE email = $1")
             .bind(&email)
