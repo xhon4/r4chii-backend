@@ -185,6 +185,34 @@ async fn register_and_login(
     (account_id, token)
 }
 
+async fn create_server(app: &axum::Router, token: &str) -> Value {
+    let response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/servers",
+            token,
+            json!({ "name": "Alice's Place" }),
+        ))
+        .await
+        .expect("create server request succeeds");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    body_json(response).await
+}
+
+async fn join_server(app: &axum::Router, token: &str, invite_code: &str) {
+    let response = app
+        .clone()
+        .oneshot(auth_request(
+            Method::POST,
+            &format!("/api/v1/invites/{invite_code}/memberships"),
+            token,
+        ))
+        .await
+        .expect("join server request succeeds");
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
 #[tokio::test]
 async fn viewing_another_accounts_public_profile_never_includes_email() {
     let (app, mail, _hub, _container) = test_app().await;
@@ -349,6 +377,27 @@ async fn an_inbound_block_hides_presence_custom_status_and_relationship_even_wit
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
+    let server = create_server(&app, &alice_token).await;
+    let server_id = server["id"].as_str().expect("server id");
+    join_server(
+        &app,
+        &bob_token,
+        server["invite_code"].as_str().expect("invite code"),
+    )
+    .await;
+
+    let avatar_update = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &bob_token,
+            json!({ "avatar_url": "https://example.com/bob.png" }),
+        ))
+        .await
+        .expect("avatar update succeeds");
+    assert_eq!(avatar_update.status(), StatusCode::OK);
+
     app.clone()
         .oneshot(auth_json_request(
             Method::POST,
@@ -363,9 +412,10 @@ async fn an_inbound_block_hides_presence_custom_status_and_relationship_even_wit
     let (_handle, _receiver) = hub.register(bob_uuid).await;
 
     let response = app
+        .clone()
         .oneshot(auth_request(
             Method::GET,
-            &format!("/api/v1/accounts/{bob_id}"),
+            &format!("/api/v1/accounts/{bob_id}?server_id={server_id}"),
             &alice_token,
         ))
         .await
@@ -374,13 +424,11 @@ async fn an_inbound_block_hides_presence_custom_status_and_relationship_even_wit
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_json(response).await;
     assert_eq!(body["relationship"], "none");
+    assert!(body["avatar_url"].is_null());
     assert_eq!(body["presence"]["status"], "offline");
     assert_eq!(body["presence"]["online"], false);
     assert!(body["custom_status"].is_null());
-    assert!(
-        body.get("server_context").is_none(),
-        "server_context must not appear for an inbound block"
-    );
+    assert!(body.get("server_context").is_none());
 }
 
 #[tokio::test]
@@ -423,6 +471,128 @@ async fn a_deleted_account_is_returned_as_a_tombstone_not_a_404() {
     assert!(body["custom_status"].is_null());
     assert!(body.get("server_context").is_none());
     assert_eq!(body["flags"]["deleted"], true);
+}
+
+#[tokio::test]
+async fn server_context_requires_shared_membership_and_rejects_invalid_server_ids() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+    let (carol_id, carol_token) =
+        register_and_login(&app, &mail, "carol@example.com", "carol").await;
+    let server = create_server(&app, &alice_token).await;
+    let server_id = server["id"].as_str().expect("server id");
+    join_server(
+        &app,
+        &bob_token,
+        server["invite_code"].as_str().expect("invite code"),
+    )
+    .await;
+
+    let cases = [
+        (
+            format!("/api/v1/accounts/{bob_id}?server_id={server_id}"),
+            &carol_token,
+        ),
+        (
+            format!("/api/v1/accounts/{carol_id}?server_id={server_id}"),
+            &alice_token,
+        ),
+        (
+            format!("/api/v1/accounts/{bob_id}?server_id={}", Uuid::now_v7()),
+            &alice_token,
+        ),
+    ];
+    for (uri, token) in cases {
+        let response = app
+            .clone()
+            .oneshot(auth_request(Method::GET, &uri, token))
+            .await
+            .expect("profile request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_json(response).await.get("server_context").is_none());
+    }
+
+    let invalid = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{bob_id}?server_id=abc"),
+            &alice_token,
+        ))
+        .await
+        .expect("invalid profile request succeeds");
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A live connection AND an `invisible` preference at once: the account is
+/// genuinely online, so anything that reports it as such is reading presence
+/// without folding the preference in.
+#[tokio::test]
+async fn an_invisible_account_reads_as_offline_to_someone_else() {
+    let (app, mail, hub, container) = test_app().await;
+    let (_alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    let bob_uuid: Uuid = bob_id.parse().expect("bob id is a uuid");
+    let pool = direct_pool(&container).await;
+    sqlx::query("UPDATE account SET status = 'invisible' WHERE id = $1")
+        .bind(bob_uuid)
+        .execute(&pool)
+        .await
+        .expect("profile status updates");
+    let (_handle, _receiver) = hub.register(bob_uuid).await;
+
+    let profile = app
+        .clone()
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{bob_id}"),
+            &alice_token,
+        ))
+        .await
+        .expect("profile request succeeds");
+    assert_eq!(profile.status(), StatusCode::OK);
+    let profile = body_json(profile).await;
+    assert_eq!(profile["presence"]["status"], "offline");
+    assert_eq!(
+        profile["presence"]["online"], false,
+        "a live connection must not surface through the invisible preference"
+    );
+}
+
+/// The other half of the rule: `invisible` hides you from third parties, and
+/// you are not a third party to yourself. Reporting your own state back as
+/// offline would leave the setting invisible to the person who set it.
+#[tokio::test]
+async fn an_invisible_account_still_sees_its_own_status() {
+    let (app, mail, hub, container) = test_app().await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    let bob_uuid: Uuid = bob_id.parse().expect("bob id is a uuid");
+    let pool = direct_pool(&container).await;
+    sqlx::query("UPDATE account SET status = 'invisible' WHERE id = $1")
+        .bind(bob_uuid)
+        .execute(&pool)
+        .await
+        .expect("profile status updates");
+    let (_handle, _receiver) = hub.register(bob_uuid).await;
+
+    let profile = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{bob_id}"),
+            &bob_token,
+        ))
+        .await
+        .expect("profile request succeeds");
+
+    assert_eq!(profile.status(), StatusCode::OK);
+    let profile = body_json(profile).await;
+    assert_eq!(profile["relationship"], "self");
+    assert_eq!(profile["presence"]["status"], "invisible");
+    assert_eq!(profile["presence"]["online"], true);
 }
 
 #[tokio::test]

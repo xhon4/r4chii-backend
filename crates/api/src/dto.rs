@@ -111,26 +111,26 @@ pub struct ProfileQuery {
 /// through the privacy decision first.
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
-    pub id: Uuid,
-    pub username: String,
-    pub display_name: String,
-    pub avatar_url: Option<String>,
-    pub banner_url: Option<String>,
-    pub accent_color: Option<String>,
-    pub bio: Option<String>,
-    pub pronouns: Option<String>,
-    pub links: Vec<ProfileLinkResponse>,
-    pub created_at: DateTime<Utc>,
-    pub presence: ProfilePresenceResponse,
-    pub custom_status: Option<ProfileCustomStatusResponse>,
+    id: Uuid,
+    username: String,
+    display_name: String,
+    avatar_url: Option<String>,
+    banner_url: Option<String>,
+    accent_color: Option<String>,
+    bio: Option<String>,
+    pronouns: Option<String>,
+    links: Vec<ProfileLinkResponse>,
+    created_at: DateTime<Utc>,
+    presence: ProfilePresenceResponse,
+    custom_status: Option<ProfileCustomStatusResponse>,
     /// Always `null` in M1 — no rich activity payload exists yet (B2).
-    pub activity: Option<()>,
+    activity: Option<()>,
     /// Always empty in M1 — no badges exist yet (B7).
-    pub badges: Vec<()>,
-    pub relationship: &'static str,
+    badges: Vec<()>,
+    relationship: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub server_context: Option<ProfileServerContextResponse>,
-    pub flags: ProfileFlagsResponse,
+    server_context: Option<ProfileServerContextResponse>,
+    flags: ProfileFlagsResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,7 +187,7 @@ impl ProfileResponse {
     /// directly. `online` is the realtime hub's answer for this account;
     /// passing a real value when `decision.presence` is `ForcedOffline` is
     /// harmless because that branch never reads it.
-    pub fn build(
+    pub(crate) fn build(
         ctx: domain::ProfileContext,
         decision: domain::ProfileVisibilityDecision,
         online: bool,
@@ -227,7 +227,7 @@ impl ProfileResponse {
             domain::ProfileFieldExposure::Hidden => (None, None, Vec::new()),
         };
 
-        let presence = match decision.presence {
+        let presence = match decision.presence_for_status(&profile.status) {
             domain::ProfilePresenceExposure::Real => ProfilePresenceResponse {
                 status: profile.status,
                 online,
@@ -239,13 +239,15 @@ impl ProfileResponse {
         };
 
         let custom_status = match decision.custom_status {
-            domain::ProfileFieldExposure::Visible => profile.custom_status.map(|text| {
-                ProfileCustomStatusResponse {
-                    text,
-                    emoji: profile.custom_emoji,
-                    expires_at: profile.custom_expires_at,
-                }
-            }),
+            domain::ProfileFieldExposure::Visible => {
+                profile
+                    .custom_status
+                    .map(|text| ProfileCustomStatusResponse {
+                        text,
+                        emoji: profile.custom_emoji,
+                        expires_at: profile.custom_expires_at,
+                    })
+            }
             domain::ProfileFieldExposure::Hidden => None,
         };
 

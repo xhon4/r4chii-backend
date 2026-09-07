@@ -187,6 +187,7 @@ async fn shared_server_context_requires_both_caller_and_target_to_be_members() {
         .await
         .unwrap();
     assert!(!not_shared.has_shared_server_context);
+    assert!(not_shared.server_context.is_none());
 
     // Bob (the target) not being a member of a DIFFERENT server: no context.
     let other_server = domain

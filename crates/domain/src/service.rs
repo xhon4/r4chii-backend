@@ -175,6 +175,29 @@ pub struct ProfileContext {
     pub has_shared_server_context: bool,
 }
 
+impl ProfileContext {
+    /// Projects the gathered facts into the policy's input. Keeps the
+    /// translation in one place so a caller cannot reach the policy with a
+    /// hand-assembled input that quietly disagrees with the context it came
+    /// from. Makes no visibility decision itself.
+    pub fn visibility_input(&self) -> crate::profile_visibility::ProfileVisibilityInput {
+        crate::profile_visibility::ProfileVisibilityInput {
+            relationship: self.relationship,
+            vis_bio: crate::profile_visibility::ProfileVisibility::from_db(&self.profile.vis_bio),
+            vis_communities: crate::profile_visibility::ProfileVisibility::from_db(
+                &self.profile.vis_communities,
+            ),
+            vis_friends: crate::profile_visibility::ProfileVisibility::from_db(
+                &self.profile.vis_friends,
+            ),
+            caller_blocked_owner: self.caller_blocked_owner,
+            owner_blocked_caller: self.owner_blocked_caller,
+            has_shared_server_context: self.has_shared_server_context,
+            is_deleted: self.profile.deleted_at.is_some(),
+        }
+    }
+}
+
 impl From<db::message::MessageRow> for MessageSummary {
     fn from(row: db::message::MessageRow) -> Self {
         // Soft-deleted rows stay in results but never carry their content
@@ -2442,7 +2465,7 @@ impl DomainService {
                         .await?
                         .is_some();
                 let shared = target_context.is_some() && caller_is_member;
-                (target_context, shared)
+                (if shared { target_context } else { None }, shared)
             }
             None => (None, false),
         };

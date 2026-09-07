@@ -132,19 +132,13 @@ pub async fn get_account(
         .get_profile_context(context.account_id, account_id, query.server_id)
         .await?;
 
-    let vis_input = domain::ProfileVisibilityInput {
-        relationship: ctx.relationship,
-        vis_bio: domain::ProfileVisibility::from_db(&ctx.profile.vis_bio),
-        vis_communities: domain::ProfileVisibility::from_db(&ctx.profile.vis_communities),
-        vis_friends: domain::ProfileVisibility::from_db(&ctx.profile.vis_friends),
-        caller_blocked_owner: ctx.caller_blocked_owner,
-        owner_blocked_caller: ctx.owner_blocked_caller,
-        has_shared_server_context: ctx.has_shared_server_context,
-        is_deleted: ctx.profile.deleted_at.is_some(),
-    };
-    let decision = domain::decide_profile_visibility(vis_input);
+    let decision = domain::decide_profile_visibility(ctx.visibility_input());
 
-    let online = if decision.presence == domain::ProfilePresenceExposure::Real {
+    // The folded exposure, not the raw one: an account that chose `invisible`
+    // must not have its live connection read at all, the same as one whose
+    // presence the relationship already hides.
+    let presence_exposure = decision.presence_for_status(&ctx.profile.status);
+    let online = if presence_exposure == domain::ProfilePresenceExposure::Real {
         state
             .realtime
             .presence_snapshot(&[account_id])

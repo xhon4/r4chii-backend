@@ -106,6 +106,28 @@ pub struct ProfileVisibilityDecision {
     pub relationship: ProfileRelationshipExposure,
 }
 
+impl ProfileVisibilityDecision {
+    /// Folds the account's persisted presence preference into the
+    /// relationship-based exposure this decision already resolved, so every
+    /// response mapper reaches the same answer instead of each re-deriving it.
+    ///
+    /// An account that chose `invisible` reads as offline to everyone else,
+    /// whatever its live connection says. The account itself is exempt: it is
+    /// not a third party, and reporting its own state back as offline would
+    /// leave it unable to see or edit the preference it just set.
+    pub fn presence_for_status(&self, status: &str) -> ProfilePresenceExposure {
+        if self.relationship == ProfileRelationshipExposure::SelfView {
+            return self.presence;
+        }
+
+        if status == "invisible" {
+            ProfilePresenceExposure::ForcedOffline
+        } else {
+            self.presence
+        }
+    }
+}
+
 fn field_exposure(
     relationship: ProfileViewerRelationship,
     visibility: ProfileVisibility,
@@ -404,6 +426,53 @@ mod tests {
             assert_eq!(decision.presence, ProfilePresenceExposure::ForcedOffline);
             assert_eq!(decision.server_context, ProfileFieldExposure::Hidden);
             assert_eq!(decision.relationship, ProfileRelationshipExposure::None);
+        }
+    }
+
+    #[test]
+    fn invisible_status_forces_offline_after_the_visibility_decision() {
+        for relationship in [
+            ProfileViewerRelationship::Friend,
+            ProfileViewerRelationship::None,
+        ] {
+            let decision = decide_profile_visibility(input(relationship));
+
+            assert_eq!(
+                decision.presence_for_status("invisible"),
+                ProfilePresenceExposure::ForcedOffline
+            );
+            assert_eq!(
+                decision.presence_for_status("online"),
+                ProfilePresenceExposure::Real
+            );
+        }
+    }
+
+    #[test]
+    fn an_account_still_sees_its_own_invisible_status() {
+        let decision = decide_profile_visibility(input(ProfileViewerRelationship::SelfView));
+
+        assert_eq!(
+            decision.presence_for_status("invisible"),
+            ProfilePresenceExposure::Real,
+            "reporting your own invisible state back as offline would hide the setting from you"
+        );
+    }
+
+    /// An inbound block already forces offline; the invisible fold must not
+    /// quietly turn that back into a real presence read for any status value.
+    #[test]
+    fn folding_status_never_widens_an_already_forced_offline_decision() {
+        let decision = decide_profile_visibility(ProfileVisibilityInput {
+            owner_blocked_caller: true,
+            ..input(ProfileViewerRelationship::Friend)
+        });
+
+        for status in ["online", "idle", "dnd", "invisible"] {
+            assert_eq!(
+                decision.presence_for_status(status),
+                ProfilePresenceExposure::ForcedOffline
+            );
         }
     }
 
