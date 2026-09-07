@@ -139,9 +139,7 @@ async fn a_deleted_account_is_reported_via_deleted_at() {
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
-    // No account-deletion service method exists yet (out of M1 scope) —
-    // this pokes the column A2 already added directly, the same way a real
-    // future deletion flow would set it.
+    // No account-deletion service method exists yet; set the column directly.
     sqlx::query("UPDATE account SET deleted_at = now() WHERE id = $1")
         .bind(bob)
         .execute(&pool)

@@ -93,22 +93,17 @@ impl From<auth::AccountSummary> for AccountResponse {
     }
 }
 
-/// Query string of `GET /accounts/{id}` — `?server_id=` opts into the
-/// per-server nickname/roles block, when the caller and the profile owner
-/// share that server (see `ProfileServerContextResponse`).
+/// Query string of `GET /accounts/{id}`. `server_id` opts into the per-server
+/// nickname and roles block.
 #[derive(Debug, Deserialize)]
 pub struct ProfileQuery {
     #[serde(default)]
     pub server_id: Option<Uuid>,
 }
 
-/// The "someone else's profile" shape: what a caller sees for *any* other
-/// account, self included via `GET /accounts/me` mapping separately to
-/// `AccountResponse`. Built ONLY by [`ProfileResponse::build`], from a
-/// `domain::ProfileVisibilityDecision` — there is no `From<ProfileContext>`
-/// or `From<db::profile::ProfileRow>` on purpose, because either would let a
-/// caller construct this response from raw profile data without running it
-/// through the privacy decision first.
+/// Another account's profile. Fields are private and [`ProfileResponse::build`]
+/// is the only constructor, so the type cannot be assembled from a raw profile
+/// row without a visibility decision.
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
     id: Uuid,
@@ -123,15 +118,12 @@ pub struct ProfileResponse {
     created_at: DateTime<Utc>,
     presence: ProfilePresenceResponse,
     custom_status: Option<ProfileCustomStatusResponse>,
-    /// Always `null` in M1 — no rich activity payload exists yet (B2).
+    /// Always `null`; no rich activity payload exists yet.
     activity: Option<()>,
-    /// Always empty in M1 — no badges exist yet (B7).
+    /// Always empty; no badges exist yet.
     badges: Vec<()>,
     relationship: &'static str,
-    /// `null` rather than an absent key, like every other optional field on
-    /// this response. Omitting it would make the client special-case one
-    /// field, and a client that forgot to would read "no shared server" and
-    /// "key missing" as the same thing.
+    /// Serializes as `null` when absent, like every other optional field here.
     server_context: Option<ProfileServerContextResponse>,
     flags: ProfileFlagsResponse,
 }
@@ -144,9 +136,8 @@ pub struct ProfileLinkResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ProfilePresenceResponse {
-    /// The persisted manual status (`online`/`idle`/`dnd`/`invisible`), or
-    /// the fixed literal `"offline"` when the decision forces presence
-    /// hidden — never read from the profile row in that case.
+    /// The persisted manual status, or the literal `"offline"` where the
+    /// decision hides presence.
     pub status: String,
     pub online: bool,
 }
@@ -166,9 +157,8 @@ pub struct ProfileServerContextResponse {
     pub joined_at: DateTime<Utc>,
 }
 
-/// Deliberately not the full `RoleResponse` (permissions/position have no
-/// reason to appear in a profile popout) — the M1 contract asks for exactly
-/// `id`/`name`/`color`.
+/// A role as it appears on a profile: identity and colour only, never
+/// permissions or position.
 #[derive(Debug, Serialize)]
 pub struct ProfileServerRoleResponse {
     pub id: Uuid,
@@ -184,12 +174,8 @@ pub struct ProfileFlagsResponse {
 }
 
 impl ProfileResponse {
-    /// The only constructor. Takes the already-decided
-    /// `domain::ProfileVisibilityDecision` and maps each field strictly
-    /// according to its exposure — never the raw `ctx.profile` value
-    /// directly. `online` is the realtime hub's answer for this account;
-    /// passing a real value when `decision.presence` is `ForcedOffline` is
-    /// harmless because that branch never reads it.
+    /// Maps each field according to its exposure in `decision`. `online` is
+    /// the realtime hub's answer, read only where presence is exposed.
     pub(crate) fn build(
         ctx: domain::ProfileContext,
         decision: domain::ProfileVisibilityDecision,
@@ -259,10 +245,6 @@ impl ProfileResponse {
             domain::ProfileRelationshipExposure::Friend => "friend",
             domain::ProfileRelationshipExposure::NoRelationship => "none",
             domain::ProfileRelationshipExposure::Blocked => "blocked",
-            // `Minimum` and `None` both collapse to "none" on purpose: the
-            // domain decision already refuses to disclose an inbound block
-            // or its direction (see `profile_visibility.rs`), and leaking
-            // that distinction in the relationship string would undo it.
             domain::ProfileRelationshipExposure::Minimum => "none",
             domain::ProfileRelationshipExposure::None => "none",
         };
@@ -317,10 +299,8 @@ mod profile_response_tests {
     use super::ProfileResponse;
     use chrono::Utc;
 
-    /// A profile with every masked field populated (non-null custom status,
-    /// a server context), so a mapper that ignores the decision and reads
-    /// the raw row anyway is caught red-handed instead of coincidentally
-    /// passing because the field happened to be empty.
+    /// Every optional field populated, so an exposure that should mask one
+    /// cannot pass by the field happening to be empty.
     fn populated_context() -> domain::ProfileContext {
         domain::ProfileContext {
             profile: db::profile::ProfileRow {
@@ -384,9 +364,6 @@ mod profile_response_tests {
         })
     }
 
-    /// Blocking controls interaction, not readability: the mapper passes
-    /// readable data through untouched and withholds only the fact of the
-    /// block, which reads as no relationship.
     #[test]
     fn an_inbound_block_passes_readable_data_through_and_withholds_only_itself() {
         let ctx = populated_context();

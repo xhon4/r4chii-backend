@@ -239,9 +239,8 @@ async fn viewing_another_accounts_public_profile_never_includes_email() {
     );
 }
 
-/// Direct connection to the same test container's database, for setup that
-/// has no HTTP path yet (there is no delete-account endpoint in M1 — only
-/// the `deleted_at` column A2 added).
+/// Direct connection to the test container's database, for setup with no HTTP
+/// path yet.
 async fn direct_pool(
     container: &testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
 ) -> db::PgPool {
@@ -363,12 +362,7 @@ async fn get_account_you_blocked_reports_blocked_relationship() {
     assert_eq!(body["relationship"], "blocked");
 }
 
-/// The sharpest case: bob blocked alice (inbound from alice's point of
-/// view) AND bob has a real live gateway connection registered. The
-/// response must still show alice a fully masked, offline profile — proof
-/// that the mapping layer honors `decide_profile_visibility`'s
-/// `ForcedOffline`/`Hidden` verdict rather than reading the real presence
-/// and profile data it has on hand.
+/// An inbound block with a live gateway connection registered for the blocker.
 #[tokio::test]
 async fn an_inbound_block_withholds_only_its_own_existence() {
     let (app, mail, hub, _container) = test_app().await;
@@ -531,9 +525,7 @@ async fn server_context_requires_shared_membership_and_rejects_invalid_server_id
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
 }
 
-/// A live connection AND an `invisible` preference at once: the account is
-/// genuinely online, so anything that reports it as such is reading presence
-/// without folding the preference in.
+/// A live connection and an `invisible` preference at once.
 #[tokio::test]
 async fn an_invisible_account_reads_as_offline_to_someone_else() {
     let (app, mail, hub, container) = test_app().await;
@@ -568,9 +560,7 @@ async fn an_invisible_account_reads_as_offline_to_someone_else() {
     );
 }
 
-/// The other half of the rule: `invisible` hides you from third parties, and
-/// you are not a third party to yourself. Reporting your own state back as
-/// offline would leave the setting invisible to the person who set it.
+/// The self-view exemption to the `invisible` fold.
 #[tokio::test]
 async fn an_invisible_account_still_sees_its_own_status() {
     let (app, mail, hub, container) = test_app().await;
@@ -891,15 +881,8 @@ async fn patch_accounts_me_rejects_an_invalid_accent_color_and_writes_nothing() 
     assert_eq!(reread["display_name"], "Test User");
 }
 
-/// The profile and the member list of a shared server must agree about an
-/// account that blocked the caller. They disagreed while the profile redacted
-/// media and presence to conceal an inbound block: the member list showed the
-/// real values, so diffing the two responses announced the block that the
-/// redaction existed to hide.
-///
-/// Blocking is an interaction boundary, not a secrecy boundary — the profile
-/// no longer redacts readable data for it, and this test is what keeps the two
-/// surfaces from drifting apart again.
+/// The profile and the member list of a shared server must report the same
+/// data for an account that blocked the caller.
 #[tokio::test]
 async fn the_profile_and_member_list_agree_about_an_account_that_blocked_you() {
     let (app, mail, _hub, _container) = test_app().await;

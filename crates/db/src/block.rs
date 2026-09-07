@@ -113,10 +113,8 @@ pub async fn exists_either_direction(
     .await
 }
 
-/// Whether `blocker_account_id` has blocked `blocked_account_id` —
-/// the directional counterpart to `exists_either_direction`, for callers
-/// that must tell which side placed the block rather than just that one
-/// exists.
+/// Whether `blocker_account_id` has blocked `blocked_account_id`. The
+/// directional counterpart to `exists_either_direction`.
 pub async fn is_blocking(
     executor: impl PgExecutor<'_>,
     blocker_account_id: Uuid,

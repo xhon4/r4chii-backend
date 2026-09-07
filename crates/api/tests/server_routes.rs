@@ -658,12 +658,8 @@ async fn create_channel_rejects_an_unsupported_kind_with_400() {
 
 #[tokio::test]
 async fn a_blocked_members_status_reports_offline_to_the_blocker_regardless_of_real_presence() {
-    // "a block hides the blocked user's social presence from the blocker".
-    //
-    // The blocked member holds a live hub connection, so their real presence
-    // is Online and the masked and unmasked answers actually differ. Without
-    // that registration the account is Offline anyway and this test passes
-    // whether or not the masking exists at all.
+    // The blocked member holds a live hub connection, so the masked and
+    // unmasked answers differ.
     let (app, mail, hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -694,8 +690,7 @@ async fn a_blocked_members_status_reports_offline_to_the_blocker_regardless_of_r
     let bob_uuid: uuid::Uuid = bob_id.parse().expect("bob id is a uuid");
     let (_handle, _receiver) = hub.register(bob_uuid).await;
 
-    // Alice blocked bob, so bob reads offline to her. Bob did not block
-    // alice, so the masking must not be reciprocal: alice stays online to him.
+    // The mask is directional: bob reads offline to alice, not the reverse.
     let control = app
         .clone()
         .oneshot(auth_request(

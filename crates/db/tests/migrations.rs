@@ -119,7 +119,7 @@ async fn migrations_create_core_tables() {
             "friends".to_owned(),
             "friends".to_owned(),
         ),
-        "new accounts must receive the M1 profile defaults"
+        "new accounts must receive the profile column defaults"
     );
 
     sqlx::query(

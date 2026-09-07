@@ -161,10 +161,8 @@ pub enum ReadAccess {
     Public,
 }
 
-/// Every fact `decide_profile_visibility` needs about one profile view,
-/// gathered but not yet judged. Carries the raw `ProfileRow` — a caller
-/// must run it through `decide_profile_visibility` before mapping any of
-/// this into a response; nothing here is safe to serialize directly.
+/// The facts `decide_profile_visibility` needs about one profile view.
+/// Carries the raw `ProfileRow`; none of it is safe to serialize directly.
 #[derive(Debug, Clone)]
 pub struct ProfileContext {
     pub profile: db::profile::ProfileRow,
@@ -176,10 +174,7 @@ pub struct ProfileContext {
 }
 
 impl ProfileContext {
-    /// Projects the gathered facts into the policy's input. Keeps the
-    /// translation in one place so a caller cannot reach the policy with a
-    /// hand-assembled input that quietly disagrees with the context it came
-    /// from. Makes no visibility decision itself.
+    /// Projects the gathered facts into the policy's input.
     pub fn visibility_input(&self) -> crate::profile_visibility::ProfileVisibilityInput {
         crate::profile_visibility::ProfileVisibilityInput {
             relationship: self.relationship,
@@ -2413,15 +2408,10 @@ impl DomainService {
         Ok(rows.into_iter().map(|row| row.blocked_account_id).collect())
     }
 
-    /// Gathers every fact `decide_profile_visibility` needs for `caller_id`
-    /// viewing `target_id`'s profile — relationship, both directional
-    /// blocks, and (when `server_id` is given) whether the two share that
-    /// server. Makes no visibility decision itself: that judgment belongs
-    /// solely to `decide_profile_visibility`, which the caller runs
-    /// separately over the result. Deliberately does not touch realtime
-    /// presence — `domain` has no dependency on `realtime` (it's the other
-    /// way around), so a caller with access to both `DomainService` and
-    /// `realtime::Hub` resolves presence itself.
+    /// Gathers the facts `decide_profile_visibility` needs for `caller_id`
+    /// viewing `target_id`: relationship, both directional blocks, and,
+    /// when `server_id` is given, whether the two share that server. Makes
+    /// no visibility decision and does not resolve realtime presence.
     pub async fn get_profile_context(
         &self,
         caller_id: Uuid,

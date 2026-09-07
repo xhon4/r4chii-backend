@@ -110,16 +110,9 @@ pub async fn login(
     Ok((StatusCode::CREATED, jar, Json(response)))
 }
 
-/// Someone else's profile, filtered through `decide_profile_visibility`
-/// (A4) according to the caller's relationship to the target: friendship,
-/// either direction of block, and whether the account is deleted. Still
-/// requires authentication like every other route in this API (there is no
-/// anonymous route except register/login) — an anonymous public read path
-/// is C1, not decided yet.
-///
-/// This is the only place that calls `decide_profile_visibility` and maps
-/// its result to a response; `get_profile_context` below only gathers the
-/// facts the decision needs, it does not judge them.
+/// Someone else's profile, filtered by `decide_profile_visibility` before
+/// the response is built. Requires authentication like every other route in
+/// this API except register/login.
 pub async fn get_account(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
@@ -134,9 +127,7 @@ pub async fn get_account(
 
     let decision = domain::decide_profile_visibility(ctx.visibility_input());
 
-    // The folded exposure, not the raw one: an account that chose `invisible`
-    // must not have its live connection read at all, the same as one whose
-    // presence the relationship already hides.
+    // The folded exposure: a hidden presence never reaches the hub lookup.
     let presence_exposure = decision.presence_for_status(&ctx.profile.status);
     let online = if presence_exposure == domain::ProfilePresenceExposure::Real {
         state
