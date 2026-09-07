@@ -830,6 +830,50 @@ impl AuthService {
         Ok(account.into())
     }
 
+    /// Records where an uploaded avatar landed.
+    ///
+    /// Separate from `update_account` because the value is produced by this
+    /// server, not supplied by the caller: it is a path on this API rather
+    /// than the absolute URL `update_account` requires of user input.
+    pub async fn set_avatar_url(
+        &self,
+        account_id: Uuid,
+        url: &str,
+    ) -> Result<AccountSummary, AuthError> {
+        let account = sqlx::query_as::<_, AccountRow>(concat!(
+            "UPDATE account SET avatar_url = $1, updated_at = now() \
+             WHERE id = $2 RETURNING ",
+            account_columns!()
+        ))
+        .bind(url)
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(AuthError::AccountNotFound)?;
+
+        Ok(account.into())
+    }
+
+    /// Records where an uploaded banner landed. See `set_avatar_url`.
+    pub async fn set_banner_url(
+        &self,
+        account_id: Uuid,
+        url: &str,
+    ) -> Result<AccountSummary, AuthError> {
+        let account = sqlx::query_as::<_, AccountRow>(concat!(
+            "UPDATE account SET banner_url = $1, updated_at = now() \
+             WHERE id = $2 RETURNING ",
+            account_columns!()
+        ))
+        .bind(url)
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(AuthError::AccountNotFound)?;
+
+        Ok(account.into())
+    }
+
     /// The caller's own ordered profile links. Kept off `get_account` so the
     /// account lookup stays one query for every caller that renders no links.
     pub async fn list_profile_links(

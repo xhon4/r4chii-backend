@@ -32,7 +32,12 @@ async fn healthz_reports_ok_when_database_is_reachable() {
         .expect("pool connects");
     db::run_migrations(&pool).await.expect("migrations run");
 
-    let app = server::build_router(pool, std::sync::Arc::new(mailer::CaptureMailer::new()), None);
+    let app = server::build_router(
+        pool,
+        std::sync::Arc::new(mailer::CaptureMailer::new()),
+        None,
+        None,
+    );
 
     let response = app
         .oneshot(

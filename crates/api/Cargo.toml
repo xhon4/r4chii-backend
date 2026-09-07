@@ -8,13 +8,14 @@ publish.workspace = true
 app-core = { version = "0.1.0", path = "../core" }
 askama = "0.16.0"
 auth = { version = "0.1.0", path = "../auth" }
-axum = { version = "0.8.9", features = ["ws"] }
+axum = { version = "0.8.9", features = ["ws", "multipart"] }
 axum-extra = { version = "0.12.6", features = ["cookie", "typed-header"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 cookie = "0.18.2"
 domain = { version = "0.1.0", path = "../domain" }
 governor = "0.10.4"
 realtime = { version = "0.1.0", path = "../realtime" }
+storage = { version = "0.1.0", path = "../storage" }
 reqwest = { version = "0.12.28", default-features = false, features = [
     "json",
     "rustls-tls",

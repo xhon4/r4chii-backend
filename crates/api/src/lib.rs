@@ -3,12 +3,13 @@ mod error;
 mod extract;
 mod gateway;
 mod handlers;
+mod media;
 mod public;
 mod rate_limit;
 mod voice;
 
 use axum::{
-    extract::FromRef,
+    extract::{DefaultBodyLimit, FromRef},
     routing::{delete, get, patch, post, put},
     Router,
 };
@@ -28,6 +29,10 @@ pub struct AppState {
     pub auth: auth::AuthService,
     pub domain: domain::DomainService,
     pub realtime: realtime::Hub,
+    /// Absent when S3 is not configured. Uploads answer with a clean error
+    /// rather than the process refusing to start, matching how the export
+    /// worker treats the same absence.
+    pub storage: Option<storage::StorageService>,
 }
 
 impl FromRef<AppState> for auth::AuthService {
@@ -104,6 +109,21 @@ pub fn router(state: AppState) -> Router {
 
     let profile_writes = Router::new()
         .route("/api/v1/accounts/me", patch(handlers::update_own_account))
+        // The body limit is the cap `domain::media` states for each purpose,
+        // applied here so an oversized upload is refused as it arrives rather
+        // than after it has been read into memory.
+        .route(
+            "/api/v1/accounts/me/avatar",
+            post(media::upload_avatar).layer(DefaultBodyLimit::max(
+                domain::ImagePurpose::Avatar.max_upload_bytes(),
+            )),
+        )
+        .route(
+            "/api/v1/accounts/me/banner",
+            post(media::upload_banner).layer(DefaultBodyLimit::max(
+                domain::ImagePurpose::Banner.max_upload_bytes(),
+            )),
+        )
         .layer(GovernorLayer::new(profile_write_config).error_handler(rate_limit::error_response))
         .with_state(state.clone());
 
@@ -161,6 +181,7 @@ pub fn router(state: AppState) -> Router {
             get(handlers::get_account_by_username),
         )
         .route("/api/v1/accounts/bulk", post(handlers::get_accounts_bulk))
+        .route("/api/v1/media/{*key}", get(media::get_media))
         .route("/api/v1/accounts/{id}", get(handlers::get_account))
         .route("/api/v1/servers", post(handlers::create_server))
         .route("/api/v1/servers", get(handlers::list_servers))

@@ -48,6 +48,7 @@ async fn test_app() -> (
         auth: auth::AuthService::new(pool, std::sync::Arc::new(mail.clone())),
         domain: domain.clone(),
         realtime: realtime::Hub::new(domain),
+        storage: None,
     };
     let hub = state.realtime.clone();
 

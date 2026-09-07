@@ -11,12 +11,14 @@ pub fn build_router(
     pool: db::PgPool,
     mailer: Arc<dyn mailer::Mailer>,
     client_dist_dir: Option<&str>,
+    storage: Option<storage::StorageService>,
 ) -> Router {
     let domain = domain::DomainService::new(pool.clone());
     let state = api::AppState {
         auth: auth::AuthService::new(pool.clone(), mailer),
         domain: domain.clone(),
         realtime: realtime::Hub::new(domain),
+        storage,
     };
 
     let router = Router::new()
@@ -105,20 +107,22 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     // get processed until storage is configured. Real deployments already
     // run Garage, so this only matters for a bare `cargo run`/CI without a
     // `.env`.
-    match storage::StorageService::from_env() {
+    let storage = match storage::StorageService::from_env() {
         Ok(storage) => {
             let export_domain = domain::DomainService::new(pool.clone());
-            tokio::spawn(run_export_worker(export_domain, storage));
+            tokio::spawn(run_export_worker(export_domain, storage.clone()));
+            Some(storage)
         }
         Err(err) => {
             tracing::warn!(
                 error = %err,
-                "S3 storage not configured — export jobs will not be processed"
+                "S3 storage not configured — exports and media uploads are unavailable"
             );
+            None
         }
-    }
+    };
 
-    let app = build_router(pool, mailer, config.client_dist_dir.as_deref());
+    let app = build_router(pool, mailer, config.client_dist_dir.as_deref(), storage);
 
     let listener = TcpListener::bind(&config.bind_addr).await?;
     tracing::info!(addr = %config.bind_addr, "server listening");
