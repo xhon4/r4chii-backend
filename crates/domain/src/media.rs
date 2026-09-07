@@ -124,7 +124,9 @@ pub fn process_image(input: &[u8], purpose: ImagePurpose) -> Result<ProcessedIma
     // Read the orientation BEFORE decoding, because it is EXIF — the very
     // thing this pipeline destroys. Strip it without applying it and every
     // phone photo comes out sideways, which looks like a bug in the resize.
-    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
 
     let mut image =
         DynamicImage::from_decoder(decoder).map_err(|e| MediaError::Decode(e.to_string()))?;

@@ -539,7 +539,9 @@ mod tests {
     #[test]
     fn validate_group_dm_participants_rejects_over_the_max() {
         let creator = app_core::new_id();
-        let too_many: Vec<Uuid> = (0..=MAX_GROUP_DM_PARTICIPANTS).map(|_| app_core::new_id()).collect();
+        let too_many: Vec<Uuid> = (0..=MAX_GROUP_DM_PARTICIPANTS)
+            .map(|_| app_core::new_id())
+            .collect();
 
         assert!(matches!(
             validate_group_dm_participants(&too_many, creator),
