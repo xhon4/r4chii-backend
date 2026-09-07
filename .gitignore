@@ -7,3 +7,5 @@
 *.md
 /docs/
 /spikes/
+# Local tooling state, not part of the build
+.atl/
