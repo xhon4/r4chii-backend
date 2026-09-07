@@ -432,7 +432,7 @@ async fn an_inbound_block_withholds_only_its_own_existence() {
     );
     assert_eq!(body["presence"]["online"], true);
     assert!(
-        body.get("server_context").is_some(),
+        !body["server_context"].is_null(),
         "shared membership is already visible in the member list"
     );
 }
@@ -475,7 +475,7 @@ async fn a_deleted_account_is_returned_as_a_tombstone_not_a_404() {
     assert_eq!(body["presence"]["status"], "offline");
     assert_eq!(body["presence"]["online"], false);
     assert!(body["custom_status"].is_null());
-    assert!(body.get("server_context").is_none());
+    assert!(body["server_context"].is_null());
     assert_eq!(body["flags"]["deleted"], true);
 }
 
@@ -517,7 +517,7 @@ async fn server_context_requires_shared_membership_and_rejects_invalid_server_id
             .await
             .expect("profile request succeeds");
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(body_json(response).await.get("server_context").is_none());
+        assert!(body_json(response).await["server_context"].is_null());
     }
 
     let invalid = app

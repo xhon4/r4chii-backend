@@ -128,7 +128,10 @@ pub struct ProfileResponse {
     /// Always empty in M1 — no badges exist yet (B7).
     badges: Vec<()>,
     relationship: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// `null` rather than an absent key, like every other optional field on
+    /// this response. Omitting it would make the client special-case one
+    /// field, and a client that forgot to would read "no shared server" and
+    /// "key missing" as the same thing.
     server_context: Option<ProfileServerContextResponse>,
     flags: ProfileFlagsResponse,
 }
@@ -381,11 +384,14 @@ mod profile_response_tests {
         })
     }
 
+    /// Blocking controls interaction, not readability: the mapper passes
+    /// readable data through untouched and withholds only the fact of the
+    /// block, which reads as no relationship.
     #[test]
-    fn an_inbound_block_masks_custom_status_and_server_context_even_with_real_data() {
+    fn an_inbound_block_passes_readable_data_through_and_withholds_only_itself() {
         let ctx = populated_context();
         let decision = domain::decide_profile_visibility(domain::ProfileVisibilityInput {
-            relationship: domain::ProfileViewerRelationship::Friend,
+            relationship: domain::ProfileViewerRelationship::None,
             vis_bio: domain::ProfileVisibility::Public,
             vis_communities: domain::ProfileVisibility::Public,
             vis_friends: domain::ProfileVisibility::Public,
@@ -395,15 +401,20 @@ mod profile_response_tests {
             is_deleted: false,
         });
 
-        // `online: true` on purpose — a real live connection — to prove the
-        // mapper does not leak it once the decision forces presence hidden.
         let response = ProfileResponse::build(ctx, decision, true, Some(app_core::new_id()));
 
-        assert_eq!(response.presence.status, "offline");
-        assert!(!response.presence.online);
-        assert!(response.custom_status.is_none());
-        assert!(response.server_context.is_none());
-        assert_eq!(response.relationship, "none");
+        assert_eq!(response.presence.status, "dnd");
+        assert!(response.presence.online);
+        assert!(response.custom_status.is_some());
+        assert!(response.server_context.is_some());
+        assert_eq!(
+            response.avatar_url.as_deref(),
+            Some("https://example.com/a.png")
+        );
+        assert_eq!(
+            response.relationship, "none",
+            "the block itself is the one thing not disclosed"
+        );
     }
 
     #[test]
