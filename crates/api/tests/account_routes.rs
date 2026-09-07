@@ -1620,3 +1620,44 @@ async fn patch_accounts_me_applies_nothing_when_a_new_field_is_invalid() {
     assert_eq!(links.len(), 1);
     assert_eq!(links[0]["label"], "github");
 }
+
+/// The stored status is what another account reads, not just what the owner
+/// sees echoed back from their own endpoint.
+#[tokio::test]
+async fn a_status_set_through_the_patch_is_what_another_account_reads() {
+    let (app, mail, hub, _container) = test_app().await;
+    let (_alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    let updated = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &bob_token,
+            json!({ "status": "dnd" }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(updated.status(), StatusCode::OK);
+
+    let (_handle, _receiver) = hub.register(bob_id.parse().expect("uuid")).await;
+
+    let response = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{bob_id}"),
+            &alice_token,
+        ))
+        .await
+        .expect("profile request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["presence"]["status"], "dnd");
+    assert_eq!(
+        body["presence"]["online"], true,
+        "the stored status is the intent; online stays the live connection"
+    );
+}
