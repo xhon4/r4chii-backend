@@ -478,34 +478,36 @@ async fn repeated_registration_attempts_from_the_same_peer_are_rate_limited() {
     // This is the per-IP limiter. The per-address gap that stops one inbox
     // being flooded lives in `auth`, because this layer runs before the body
     // is parsed and never sees which address a request names.
+    // The body is deliberately invalid. This limiter runs before the body is
+    // parsed, so a rejected request still spends a cell, and the quota is
+    // reached without paying three password hashes and three inserts — work
+    // that can outlast the 4s replenish and hand the third request a fresh
+    // cell, which is a property of the harness rather than of the limiter.
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 0);
-    let build = |email: &str, username: &str| {
+    let build = || {
         Request::builder()
             .method(Method::POST)
             .uri("/api/v1/registrations")
             .extension(ConnectInfo(peer))
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(register_body(email, username).to_string()))
+            .body(Body::from("{}"))
             .expect("request builds")
     };
 
     let first = app
         .clone()
-        .oneshot(build("rate1@example.com", "rate_one"))
+        .oneshot(build())
         .await
         .expect("request succeeds");
     let second = app
         .clone()
-        .oneshot(build("rate2@example.com", "rate_two"))
+        .oneshot(build())
         .await
         .expect("request succeeds");
-    let third = app
-        .oneshot(build("rate3@example.com", "rate_three"))
-        .await
-        .expect("request succeeds");
+    let third = app.oneshot(build()).await.expect("request succeeds");
 
-    assert_eq!(first.status(), StatusCode::ACCEPTED);
-    assert_eq!(second.status(), StatusCode::ACCEPTED);
+    assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(second.status(), StatusCode::BAD_REQUEST);
     assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
 
     let body = body_json(third).await;
