@@ -10,13 +10,15 @@ use crate::crypto::{
 };
 use crate::error::AuthError;
 use crate::types::{
-    AccountSummary, LoginInput, RegisterInput, SessionSummary, UpdateAccountInput,
+    AccountSummary, LoginInput, ProfileLink, RegisterInput, SessionSummary, UpdateAccountInput,
     VerifyRegistrationInput,
 };
 use crate::validation::{
-    normalize_email, validate_accent_color, validate_avatar_url, validate_banner_url,
-    validate_bio, validate_display_name, validate_email, validate_password, validate_pronouns,
-    validate_username,
+    normalize_email, sanitize_custom_status_emoji, sanitize_custom_status_text,
+    sanitize_profile_link_label, sanitize_profile_link_url, validate_accent_color,
+    validate_avatar_url, validate_banner_url, validate_bio, validate_custom_status_expiry,
+    validate_display_name, validate_email, validate_password, validate_profile_link_count,
+    validate_pronouns, validate_status, validate_username, validate_visibility,
 };
 use crate::verification::{
     code_matches, digest_code, generate_code, CODE_TTL_MINUTES, MAX_ATTEMPTS,
@@ -89,6 +91,13 @@ struct AccountRow {
     pronouns: Option<String>,
     created_at: DateTime<Utc>,
     email_verified_at: Option<DateTime<Utc>>,
+    status: String,
+    custom_status: Option<String>,
+    custom_emoji: Option<String>,
+    custom_expires_at: Option<DateTime<Utc>>,
+    vis_bio: String,
+    vis_communities: String,
+    vis_friends: String,
 }
 
 /// The column list every account query selects. One definition, so a new
@@ -99,10 +108,15 @@ struct AccountRow {
 /// building the SQL with `format!` instead would hand sqlx a runtime string,
 /// which it refuses without an explicit injection audit. This way every query
 /// below is still a single compile-time literal.
+///
+/// The enum-typed columns are cast to text so they map onto plain `String`
+/// fields; the domain values themselves are validated on write.
 macro_rules! account_columns {
     () => {
         "id, username, email, display_name, avatar_url, bio, banner_url, accent_color, \
-         pronouns, created_at, email_verified_at"
+         pronouns, created_at, email_verified_at, status::text AS status, custom_status, \
+         custom_emoji, custom_expires_at, vis_bio::text AS vis_bio, \
+         vis_communities::text AS vis_communities, vis_friends::text AS vis_friends"
     };
 }
 
@@ -120,6 +134,13 @@ impl From<AccountRow> for AccountSummary {
             pronouns: row.pronouns,
             created_at: row.created_at,
             email_verified_at: row.email_verified_at,
+            status: row.status,
+            custom_status: row.custom_status,
+            custom_emoji: row.custom_emoji,
+            custom_expires_at: row.custom_expires_at,
+            vis_bio: row.vis_bio,
+            vis_communities: row.vis_communities,
+            vis_friends: row.vis_friends,
         }
     }
 }
@@ -651,6 +672,64 @@ impl AuthService {
         if let Some(Some(pronouns)) = &input.pronouns {
             validate_pronouns(pronouns)?;
         }
+        if let Some(status) = &input.status {
+            validate_status(status)?;
+        }
+
+        // Every value is validated and sanitized before the first write, so a
+        // request carrying one bad field applies none of its good ones.
+        let visibility = input.visibility.as_ref();
+        let vis_bio = visibility.and_then(|visibility| visibility.bio.clone());
+        let vis_communities = visibility.and_then(|visibility| visibility.communities.clone());
+        let vis_friends = visibility.and_then(|visibility| visibility.friends.clone());
+        if let Some(value) = &vis_bio {
+            validate_visibility("bio", value)?;
+        }
+        if let Some(value) = &vis_communities {
+            validate_visibility("communities", value)?;
+        }
+        if let Some(value) = &vis_friends {
+            validate_visibility("friends", value)?;
+        }
+
+        // The text, the emoji, and the expiry are one setting over three
+        // columns: an explicit null clears all three, and so does a text that
+        // is empty once trimmed.
+        let custom_status_present = input.custom_status.is_some();
+        let mut custom_status_text = None;
+        let mut custom_status_emoji = None;
+        let mut custom_status_expires_at = None;
+        if let Some(Some(custom_status)) = &input.custom_status {
+            let text = sanitize_custom_status_text(&custom_status.text)?;
+            let emoji = match &custom_status.emoji {
+                Some(emoji) => sanitize_custom_status_emoji(emoji)?,
+                None => None,
+            };
+            if let Some(expires_at) = custom_status.expires_at {
+                validate_custom_status_expiry(expires_at, Utc::now())?;
+            }
+
+            if text.is_some() {
+                custom_status_text = text;
+                custom_status_emoji = emoji;
+                custom_status_expires_at = custom_status.expires_at;
+            }
+        }
+
+        let links = match &input.links {
+            Some(links) => {
+                validate_profile_link_count(links.len())?;
+                let mut sanitized = Vec::with_capacity(links.len());
+                for link in links {
+                    sanitized.push(db::profile::ProfileLinkInput {
+                        label: sanitize_profile_link_label(&link.label)?,
+                        url: sanitize_profile_link_url(&link.url)?,
+                    });
+                }
+                Some(sanitized)
+            }
+            None => None,
+        };
 
         // Nothing to change: skip the UPDATE entirely (and its `updated_at`
         // bump) and just return the current row.
@@ -661,6 +740,12 @@ impl AuthService {
             && input.banner_url.is_none()
             && input.accent_color.is_none()
             && input.pronouns.is_none()
+            && input.status.is_none()
+            && !custom_status_present
+            && links.is_none()
+            && vis_bio.is_none()
+            && vis_communities.is_none()
+            && vis_friends.is_none()
         {
             return self.get_account(account_id).await;
         }
@@ -672,7 +757,14 @@ impl AuthService {
         // `COALESCE(NULL, column)` is the column, so a clear would silently
         // become a no-op and a user could never remove their own bio.
         // `username`/`display_name` are NOT NULL, so COALESCE still says
-        // everything there is to say about them.
+        // everything there is to say about them. The enum-typed columns take
+        // their value as text and cast, so a bound `String` maps cleanly onto
+        // the parameter Postgres describes.
+        //
+        // The links replacement below shares this transaction, so an account
+        // update and its link set commit or roll back together.
+        let mut transaction = self.pool.begin().await?;
+
         let account = sqlx::query_as::<_, AccountRow>(concat!(
             "UPDATE account \
              SET username = COALESCE($1, username), \
@@ -682,8 +774,15 @@ impl AuthService {
                  banner_url = CASE WHEN $7 THEN $8 ELSE banner_url END, \
                  accent_color = CASE WHEN $9 THEN $10 ELSE accent_color END, \
                  pronouns = CASE WHEN $11 THEN $12 ELSE pronouns END, \
+                 status = COALESCE($13::text::presence_status, status), \
+                 custom_status = CASE WHEN $14 THEN $15 ELSE custom_status END, \
+                 custom_emoji = CASE WHEN $14 THEN $16 ELSE custom_emoji END, \
+                 custom_expires_at = CASE WHEN $14 THEN $17 ELSE custom_expires_at END, \
+                 vis_bio = COALESCE($18::text::visibility, vis_bio), \
+                 vis_communities = COALESCE($19::text::visibility, vis_communities), \
+                 vis_friends = COALESCE($20::text::visibility, vis_friends), \
                  updated_at = now() \
-             WHERE id = $13 RETURNING ",
+             WHERE id = $21 RETURNING ",
             account_columns!()
         ))
         .bind(&input.username)
@@ -698,8 +797,16 @@ impl AuthService {
         .bind(input.accent_color.clone().flatten())
         .bind(input.pronouns.is_some())
         .bind(input.pronouns.clone().flatten())
+        .bind(&input.status)
+        .bind(custom_status_present)
+        .bind(custom_status_text)
+        .bind(custom_status_emoji)
+        .bind(custom_status_expires_at)
+        .bind(vis_bio)
+        .bind(vis_communities)
+        .bind(vis_friends)
         .bind(account_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(map_account_conflict)?
         // `account_id` only ever comes from a verified `AuthContext`, never
@@ -707,7 +814,30 @@ impl AuthService {
         // `AccountNotFound` rather than panicking if it somehow does.
         .ok_or(AuthError::AccountNotFound)?;
 
+        if let Some(links) = &links {
+            db::profile::replace_links(&mut transaction, account_id, links).await?;
+        }
+
+        transaction.commit().await?;
+
         Ok(account.into())
+    }
+
+    /// The caller's own ordered profile links. Kept off `get_account` so the
+    /// account lookup stays one query for every caller that renders no links.
+    pub async fn list_profile_links(
+        &self,
+        account_id: Uuid,
+    ) -> Result<Vec<ProfileLink>, AuthError> {
+        let links = db::profile::list_links(&self.pool, account_id).await?;
+
+        Ok(links
+            .into_iter()
+            .map(|link| ProfileLink {
+                label: link.label,
+                url: link.url,
+            })
+            .collect())
     }
 
     pub async fn login(&self, input: LoginInput) -> Result<(SessionSummary, String), AuthError> {

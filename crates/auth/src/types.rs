@@ -44,6 +44,15 @@ pub struct AccountSummary {
     pub pronouns: Option<String>,
     /// Doubles as the global "member since", surfaced on `AccountResponse`.
     pub created_at: DateTime<Utc>,
+    /// One of `online`, `idle`, `dnd`, `invisible`.
+    pub status: String,
+    pub custom_status: Option<String>,
+    pub custom_emoji: Option<String>,
+    pub custom_expires_at: Option<DateTime<Utc>>,
+    /// Each one of `public`, `friends`, `private`.
+    pub vis_bio: String,
+    pub vis_communities: String,
+    pub vis_friends: String,
     /// When the address was proven. `None` only for accounts predating
     /// required email verification — after that, an account cannot exist without a proven address,
     /// so `None` means "grandfathered", not "suspicious". Those accounts are
@@ -76,6 +85,40 @@ pub struct UpdateAccountInput {
     pub banner_url: Option<Option<String>>,
     pub accent_color: Option<Option<String>>,
     pub pronouns: Option<Option<String>>,
+    /// `status` is a NOT NULL column with a default, so there is no clear to
+    /// express: `None` leaves it alone.
+    pub status: Option<String>,
+    /// `Some(None)` clears the status text, its emoji, and its expiry
+    /// together — they are one setting spread over three columns.
+    pub custom_status: Option<Option<CustomStatusInput>>,
+    /// Present replaces the whole ordered set; an empty vector removes every
+    /// link.
+    pub links: Option<Vec<ProfileLink>>,
+    pub visibility: Option<VisibilityInput>,
+}
+
+/// A manual status: the text plus its optional emoji and expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomStatusInput {
+    pub text: String,
+    pub emoji: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// One labelled profile link, both as written and as read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileLink {
+    pub label: String,
+    pub url: String,
+}
+
+/// The three visibility axes. Each is independently optional so a caller can
+/// change one without restating the others.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VisibilityInput {
+    pub bio: Option<String>,
+    pub communities: Option<String>,
+    pub friends: Option<String>,
 }
 
 /// Public-safe view of a `session` row. Never carries `token_hash`.

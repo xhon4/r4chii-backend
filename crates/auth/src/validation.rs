@@ -3,6 +3,8 @@
 //! api crate's job is limited to JSON structural parsing and mapping
 //! `AuthError::Validation` to a 400 response.
 
+use chrono::{DateTime, TimeDelta, Utc};
+
 use crate::error::AuthError;
 
 /// A password long enough to survive a naive length-based DoS against the
@@ -202,6 +204,168 @@ pub(crate) fn validate_pronouns(pronouns: &str) -> Result<(), AuthError> {
     }
 
     Ok(())
+}
+
+/// The `presence_status` enum's members. An unlisted value is rejected here
+/// rather than at the cast, which would surface as a server error.
+const PRESENCE_STATUSES: [&str; 4] = ["online", "idle", "dnd", "invisible"];
+
+/// The `visibility` enum's members, rejected here for the same reason.
+const VISIBILITIES: [&str; 3] = ["public", "friends", "private"];
+
+/// Matches the `account_custom_status_len` constraint. Characters, not bytes.
+const MAX_CUSTOM_STATUS_LEN: usize = 128;
+
+/// No database constraint bounds the emoji column. This is a defensive cap,
+/// wide enough for a composed sequence joined by zero-width joiners.
+const MAX_CUSTOM_EMOJI_LEN: usize = 16;
+
+/// How far ahead a manual status may be scheduled to clear itself.
+const MAX_CUSTOM_STATUS_TTL_HOURS: i64 = 24;
+
+const MAX_PROFILE_LINKS: usize = 5;
+
+/// Matches `account_profile_link`'s `label_len` and `url_len` constraints.
+const MAX_LINK_LABEL_LEN: usize = 32;
+const MAX_LINK_URL_LEN: usize = 256;
+
+pub(crate) fn validate_status(status: &str) -> Result<(), AuthError> {
+    if !PRESENCE_STATUSES.contains(&status) {
+        return Err(AuthError::Validation(format!(
+            "status must be one of: {}",
+            PRESENCE_STATUSES.join(", ")
+        )));
+    }
+
+    Ok(())
+}
+
+/// `axis` names the field in the error so a caller sees which of the three
+/// visibility settings was rejected.
+pub(crate) fn validate_visibility(axis: &str, value: &str) -> Result<(), AuthError> {
+    if !VISIBILITIES.contains(&value) {
+        return Err(AuthError::Validation(format!(
+            "{axis} visibility must be one of: {}",
+            VISIBILITIES.join(", ")
+        )));
+    }
+
+    Ok(())
+}
+
+/// Trims the text and rejects control characters, which includes newlines.
+/// `Ok(None)` means the text was empty or whitespace only, which the caller
+/// treats as a request to clear the status.
+pub(crate) fn sanitize_custom_status_text(text: &str) -> Result<Option<String>, AuthError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed.chars().count() > MAX_CUSTOM_STATUS_LEN {
+        return Err(AuthError::Validation(format!(
+            "custom status must be at most {MAX_CUSTOM_STATUS_LEN} characters"
+        )));
+    }
+
+    if trimmed.chars().any(char::is_control) {
+        return Err(AuthError::Validation(
+            "custom status must not contain line breaks or control characters".to_string(),
+        ));
+    }
+
+    Ok(Some(trimmed.to_string()))
+}
+
+/// Trims the emoji and applies the defensive length cap. `Ok(None)` means
+/// nothing was supplied to store.
+pub(crate) fn sanitize_custom_status_emoji(emoji: &str) -> Result<Option<String>, AuthError> {
+    let trimmed = emoji.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed.chars().count() > MAX_CUSTOM_EMOJI_LEN {
+        return Err(AuthError::Validation(format!(
+            "custom status emoji must be at most {MAX_CUSTOM_EMOJI_LEN} characters, \
+             a defensive bound rather than a contract limit"
+        )));
+    }
+
+    if trimmed.chars().any(char::is_control) {
+        return Err(AuthError::Validation(
+            "custom status emoji must not contain control characters".to_string(),
+        ));
+    }
+
+    Ok(Some(trimmed.to_string()))
+}
+
+pub(crate) fn validate_custom_status_expiry(
+    expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<(), AuthError> {
+    if expires_at <= now {
+        return Err(AuthError::Validation(
+            "custom status expiry must be in the future".to_string(),
+        ));
+    }
+
+    if expires_at > now + TimeDelta::hours(MAX_CUSTOM_STATUS_TTL_HOURS) {
+        return Err(AuthError::Validation(format!(
+            "custom status expiry must be at most {MAX_CUSTOM_STATUS_TTL_HOURS} hours from now"
+        )));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_profile_link_count(count: usize) -> Result<(), AuthError> {
+    if count > MAX_PROFILE_LINKS {
+        return Err(AuthError::Validation(format!(
+            "at most {MAX_PROFILE_LINKS} profile links are allowed"
+        )));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn sanitize_profile_link_label(label: &str) -> Result<String, AuthError> {
+    let trimmed = label.trim();
+    let len = trimmed.chars().count();
+    if !(1..=MAX_LINK_LABEL_LEN).contains(&len) {
+        return Err(AuthError::Validation(format!(
+            "profile link label must be between 1 and {MAX_LINK_LABEL_LEN} characters"
+        )));
+    }
+
+    if trimmed.chars().any(char::is_control) {
+        return Err(AuthError::Validation(
+            "profile link label must not contain line breaks or control characters".to_string(),
+        ));
+    }
+
+    Ok(trimmed.to_string())
+}
+
+/// Applies the column's own length bound, then defers to the url rules the
+/// avatar and banner fields already use so all three accept the same schemes.
+pub(crate) fn sanitize_profile_link_url(url: &str) -> Result<String, AuthError> {
+    let trimmed = url.trim();
+    if trimmed.chars().count() > MAX_LINK_URL_LEN {
+        return Err(AuthError::Validation(format!(
+            "profile link url must be at most {MAX_LINK_URL_LEN} characters"
+        )));
+    }
+
+    validate_avatar_url(trimmed).map_err(|err| match err {
+        AuthError::Validation(message) => {
+            AuthError::Validation(message.replace("avatar url", "profile link url"))
+        }
+        other => other,
+    })?;
+
+    Ok(trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -404,5 +568,163 @@ mod tests {
         assert!(validate_pronouns("12/34").is_err(), "digits are not letters");
         assert!(validate_pronouns("s e/h e").is_err(), "spaces are not letters");
         assert!(validate_pronouns("").is_err());
+    }
+
+    #[test]
+    fn validate_status_accepts_every_enum_member() {
+        for status in PRESENCE_STATUSES {
+            assert!(validate_status(status).is_ok(), "{status} is a real status");
+        }
+    }
+
+    #[test]
+    fn validate_status_rejects_anything_else() {
+        assert!(validate_status("offline").is_err(), "a derived value");
+        assert!(validate_status("Online").is_err(), "wrong case");
+        assert!(validate_status("away").is_err());
+        assert!(validate_status("").is_err());
+    }
+
+    #[test]
+    fn validate_visibility_accepts_every_enum_member() {
+        for value in VISIBILITIES {
+            assert!(validate_visibility("bio", value).is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_visibility_rejects_anything_else_and_names_the_axis() {
+        let error = validate_visibility("communities", "everyone").expect_err("must be rejected");
+        let AuthError::Validation(message) = error else {
+            panic!("expected a validation error");
+        };
+        assert!(
+            message.contains("communities"),
+            "the error should name the axis it is about, got: {message}"
+        );
+    }
+
+    #[test]
+    fn sanitize_custom_status_text_trims_and_keeps_the_text() {
+        let sanitized = sanitize_custom_status_text("  en una reunión  ").expect("valid");
+        assert_eq!(sanitized.as_deref(), Some("en una reunión"));
+    }
+
+    #[test]
+    fn sanitize_custom_status_text_reads_an_empty_value_as_a_clear() {
+        assert_eq!(sanitize_custom_status_text("").expect("valid"), None);
+        assert_eq!(sanitize_custom_status_text("   ").expect("valid"), None);
+    }
+
+    #[test]
+    fn sanitize_custom_status_text_rejects_over_the_max_length() {
+        assert!(sanitize_custom_status_text(&"a".repeat(MAX_CUSTOM_STATUS_LEN)).is_ok());
+        assert!(sanitize_custom_status_text(&"a".repeat(MAX_CUSTOM_STATUS_LEN + 1)).is_err());
+    }
+
+    /// The column's constraint counts characters, so the check that guards it
+    /// has to as well.
+    #[test]
+    fn sanitize_custom_status_text_counts_characters_not_bytes() {
+        assert!(sanitize_custom_status_text(&"á".repeat(MAX_CUSTOM_STATUS_LEN)).is_ok());
+    }
+
+    #[test]
+    fn sanitize_custom_status_text_rejects_line_breaks_and_control_characters() {
+        assert!(sanitize_custom_status_text("two\nlines").is_err());
+        assert!(sanitize_custom_status_text("a\tb").is_err());
+        assert!(sanitize_custom_status_text("a\u{0000}b").is_err());
+    }
+
+    #[test]
+    fn sanitize_custom_status_emoji_accepts_a_composed_sequence() {
+        let sanitized = sanitize_custom_status_emoji("👩‍💻").expect("valid");
+        assert_eq!(sanitized.as_deref(), Some("👩‍💻"));
+    }
+
+    #[test]
+    fn sanitize_custom_status_emoji_rejects_over_the_defensive_bound() {
+        assert!(sanitize_custom_status_emoji(&"a".repeat(MAX_CUSTOM_EMOJI_LEN)).is_ok());
+        assert!(sanitize_custom_status_emoji(&"a".repeat(MAX_CUSTOM_EMOJI_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn validate_custom_status_expiry_accepts_a_time_inside_the_window() {
+        let now = Utc::now();
+        assert!(validate_custom_status_expiry(now + TimeDelta::hours(1), now).is_ok());
+        assert!(validate_custom_status_expiry(
+            now + TimeDelta::hours(MAX_CUSTOM_STATUS_TTL_HOURS),
+            now
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_custom_status_expiry_rejects_the_past_and_the_present() {
+        let now = Utc::now();
+        assert!(validate_custom_status_expiry(now - TimeDelta::hours(1), now).is_err());
+        assert!(validate_custom_status_expiry(now, now).is_err());
+    }
+
+    #[test]
+    fn validate_custom_status_expiry_rejects_past_the_window() {
+        let now = Utc::now();
+        assert!(validate_custom_status_expiry(
+            now + TimeDelta::hours(MAX_CUSTOM_STATUS_TTL_HOURS) + TimeDelta::seconds(1),
+            now
+        )
+        .is_err());
+        assert!(validate_custom_status_expiry(now + TimeDelta::hours(48), now).is_err());
+    }
+
+    #[test]
+    fn validate_profile_link_count_accepts_up_to_the_limit() {
+        assert!(validate_profile_link_count(0).is_ok());
+        assert!(validate_profile_link_count(MAX_PROFILE_LINKS).is_ok());
+        assert!(validate_profile_link_count(MAX_PROFILE_LINKS + 1).is_err());
+    }
+
+    #[test]
+    fn sanitize_profile_link_label_trims_and_bounds_the_label() {
+        assert_eq!(
+            sanitize_profile_link_label("  github  ").expect("valid"),
+            "github"
+        );
+        assert!(sanitize_profile_link_label(&"a".repeat(MAX_LINK_LABEL_LEN)).is_ok());
+        assert!(sanitize_profile_link_label(&"a".repeat(MAX_LINK_LABEL_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn sanitize_profile_link_label_rejects_an_empty_label() {
+        assert!(sanitize_profile_link_label("").is_err());
+        assert!(sanitize_profile_link_label("   ").is_err());
+    }
+
+    #[test]
+    fn sanitize_profile_link_url_accepts_http_and_https() {
+        assert!(sanitize_profile_link_url("https://example.com/me").is_ok());
+        assert!(sanitize_profile_link_url("http://example.com/me").is_ok());
+    }
+
+    #[test]
+    fn sanitize_profile_link_url_rejects_other_schemes_with_its_own_field_name() {
+        let error = sanitize_profile_link_url("javascript:alert(1)").expect_err("must be rejected");
+        let AuthError::Validation(message) = error else {
+            panic!("expected a validation error");
+        };
+        assert!(
+            message.contains("profile link url"),
+            "the error should name the field it is about, got: {message}"
+        );
+        assert!(sanitize_profile_link_url("ftp://example.com/me").is_err());
+    }
+
+    #[test]
+    fn sanitize_profile_link_url_rejects_over_the_column_bound() {
+        let prefix = "https://example.com/";
+        let at_limit = format!("{prefix}{}", "a".repeat(MAX_LINK_URL_LEN - prefix.len()));
+        assert_eq!(at_limit.chars().count(), MAX_LINK_URL_LEN);
+        assert!(sanitize_profile_link_url(&at_limit).is_ok());
+        assert!(sanitize_profile_link_url(&format!("{at_limit}a")).is_err());
     }
 }

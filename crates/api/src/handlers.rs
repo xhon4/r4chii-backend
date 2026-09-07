@@ -86,7 +86,11 @@ pub async fn register(
 ) -> Result<(StatusCode, Json<AccountResponse>), ApiError> {
     let Json(body) = body?;
     let account = state.auth.verify_registration(body.into()).await?;
-    Ok((StatusCode::CREATED, Json(account.into())))
+    // A newly created account has no profile links yet.
+    Ok((
+        StatusCode::CREATED,
+        Json(AccountResponse::build(account, Vec::new())),
+    ))
 }
 
 pub async fn login(
@@ -241,7 +245,8 @@ pub async fn get_own_account(
     AuthenticatedUser(context): AuthenticatedUser,
 ) -> Result<Json<AccountResponse>, ApiError> {
     let account = state.auth.get_account(context.account_id).await?;
-    Ok(Json(account.into()))
+    let links = state.auth.list_profile_links(context.account_id).await?;
+    Ok(Json(AccountResponse::build(account, links)))
 }
 
 /// Always updates the CALLER's own account — never takes an `id` path
@@ -256,7 +261,8 @@ pub async fn update_own_account(
         .auth
         .update_account(context.account_id, body.into())
         .await?;
-    Ok(Json(account.into()))
+    let links = state.auth.list_profile_links(context.account_id).await?;
+    Ok(Json(AccountResponse::build(account, links)))
 }
 
 pub async fn list_sessions(

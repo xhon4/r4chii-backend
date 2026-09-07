@@ -73,10 +73,33 @@ pub struct AccountResponse {
     /// block a request. Self shape only — whether someone else has verified is
     /// nobody's business.
     pub email_verified_at: Option<DateTime<Utc>>,
+    /// The stored manual status, never the derived `offline` a viewer sees.
+    pub status: String,
+    pub custom_status: Option<ProfileCustomStatusResponse>,
+    pub links: Vec<ProfileLinkResponse>,
+    pub visibility: AccountVisibilityResponse,
 }
 
-impl From<auth::AccountSummary> for AccountResponse {
-    fn from(account: auth::AccountSummary) -> Self {
+/// The three visibility axes as the owner set them.
+#[derive(Debug, Serialize)]
+pub struct AccountVisibilityResponse {
+    pub bio: String,
+    pub communities: String,
+    pub friends: String,
+}
+
+impl AccountResponse {
+    /// Links live in their own table, so the caller reads them separately and
+    /// hands them in here.
+    pub(crate) fn build(account: auth::AccountSummary, links: Vec<auth::ProfileLink>) -> Self {
+        let custom_status = account
+            .custom_status
+            .map(|text| ProfileCustomStatusResponse {
+                text,
+                emoji: account.custom_emoji,
+                expires_at: account.custom_expires_at,
+            });
+
         Self {
             id: account.id,
             username: account.username,
@@ -89,6 +112,20 @@ impl From<auth::AccountSummary> for AccountResponse {
             pronouns: account.pronouns,
             created_at: account.created_at,
             email_verified_at: account.email_verified_at,
+            status: account.status,
+            custom_status,
+            links: links
+                .into_iter()
+                .map(|link| ProfileLinkResponse {
+                    label: link.label,
+                    url: link.url,
+                })
+                .collect(),
+            visibility: AccountVisibilityResponse {
+                bio: account.vis_bio,
+                communities: account.vis_communities,
+                friends: account.vis_friends,
+            },
         }
     }
 }
@@ -550,6 +587,44 @@ pub struct UpdateAccountRequest {
     pub accent_color: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     pub pronouns: Option<Option<String>>,
+    /// A NOT NULL column with a default, so there is no `null` to send.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// `null` clears the status text, its emoji, and its expiry together.
+    #[serde(default, deserialize_with = "double_option")]
+    pub custom_status: Option<Option<CustomStatusRequest>>,
+    /// Present replaces the whole ordered set; `[]` removes every link.
+    #[serde(default)]
+    pub links: Option<Vec<ProfileLinkRequest>>,
+    #[serde(default)]
+    pub visibility: Option<VisibilityRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CustomStatusRequest {
+    pub text: String,
+    #[serde(default)]
+    pub emoji: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProfileLinkRequest {
+    pub label: String,
+    pub url: String,
+}
+
+/// Each axis is independently optional, so one can change without the caller
+/// restating the other two.
+#[derive(Debug, Deserialize)]
+pub struct VisibilityRequest {
+    #[serde(default)]
+    pub bio: Option<String>,
+    #[serde(default)]
+    pub communities: Option<String>,
+    #[serde(default)]
+    pub friends: Option<String>,
 }
 
 impl From<UpdateAccountRequest> for auth::UpdateAccountInput {
@@ -562,6 +637,28 @@ impl From<UpdateAccountRequest> for auth::UpdateAccountInput {
             banner_url: req.banner_url,
             accent_color: req.accent_color,
             pronouns: req.pronouns,
+            status: req.status,
+            custom_status: req.custom_status.map(|custom_status| {
+                custom_status.map(|custom_status| auth::CustomStatusInput {
+                    text: custom_status.text,
+                    emoji: custom_status.emoji,
+                    expires_at: custom_status.expires_at,
+                })
+            }),
+            links: req.links.map(|links| {
+                links
+                    .into_iter()
+                    .map(|link| auth::ProfileLink {
+                        label: link.label,
+                        url: link.url,
+                    })
+                    .collect()
+            }),
+            visibility: req.visibility.map(|visibility| auth::VisibilityInput {
+                bio: visibility.bio,
+                communities: visibility.communities,
+                friends: visibility.friends,
+            }),
         }
     }
 }

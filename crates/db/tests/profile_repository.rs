@@ -41,6 +41,19 @@ async fn insert_account(pool: &PgPool, username: &str) -> Uuid {
     id
 }
 
+/// `replace_links` takes the caller's connection, so the transaction boundary
+/// belongs to the caller. These tests open one per replacement; dropping it on
+/// an error is what rolls the replacement back.
+async fn replace_links_in_transaction(
+    pool: &PgPool,
+    account_id: Uuid,
+    links: &[ProfileLinkInput],
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    replace_links(&mut transaction, account_id, links).await?;
+    transaction.commit().await
+}
+
 #[tokio::test]
 async fn bulk_profiles_reads_a2_fields_and_returns_profiles_without_links() {
     let (pool, _container) = test_pool().await;
@@ -103,7 +116,7 @@ async fn bulk_profiles_returns_links_in_position_order() {
     let (pool, _container) = test_pool().await;
     let account_id = insert_account(&pool, "profile-links").await;
 
-    replace_links(
+    replace_links_in_transaction(
         &pool,
         account_id,
         &[
@@ -130,14 +143,14 @@ async fn replace_links_completely_replaces_the_existing_set() {
     let (pool, _container) = test_pool().await;
     let account_id = insert_account(&pool, "profile-replace").await;
 
-    replace_links(
+    replace_links_in_transaction(
         &pool,
         account_id,
         &[ProfileLinkInput::new("Old", "https://old.example")],
     )
     .await
     .expect("initial links replace");
-    replace_links(
+    replace_links_in_transaction(
         &pool,
         account_id,
         &[
@@ -158,7 +171,7 @@ async fn replace_links_completely_replaces_the_existing_set() {
     assert!(links.iter().all(|link| link.id.get_version_num() == 7));
     assert_ne!(links[0].id, links[1].id);
 
-    replace_links(&pool, account_id, &[])
+    replace_links_in_transaction(&pool, account_id, &[])
         .await
         .expect("empty replacement clears links");
     let profiles = get_profiles_bulk(&pool, &[account_id])
@@ -176,7 +189,7 @@ async fn replace_links_rejects_an_unknown_account_for_empty_and_non_empty_replac
         vec![],
         vec![ProfileLinkInput::new("Link", "https://link.example")],
     ] {
-        let error = replace_links(&pool, account_id, &links)
+        let error = replace_links_in_transaction(&pool, account_id, &links)
             .await
             .expect_err("unknown accounts are rejected before replacing links");
         assert!(matches!(error, sqlx::Error::RowNotFound));
@@ -188,7 +201,7 @@ async fn replace_links_rolls_back_when_a_new_link_violates_a_constraint() {
     let (pool, _container) = test_pool().await;
     let account_id = insert_account(&pool, "profile-atomic").await;
 
-    replace_links(
+    replace_links_in_transaction(
         &pool,
         account_id,
         &[ProfileLinkInput::new("Kept", "https://kept.example")],
@@ -196,7 +209,7 @@ async fn replace_links_rolls_back_when_a_new_link_violates_a_constraint() {
     .await
     .expect("initial links replace");
 
-    let result = replace_links(
+    let result = replace_links_in_transaction(
         &pool,
         account_id,
         &[ProfileLinkInput::new("", "https://invalid.example")],

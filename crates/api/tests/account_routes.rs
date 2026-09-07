@@ -1159,3 +1159,464 @@ async fn the_username_lookup_is_exact_and_missing_usernames_are_404() {
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
     }
 }
+
+/// An empty patch changes nothing, including the profile fields that arrived
+/// after the original set.
+#[tokio::test]
+async fn patch_accounts_me_with_an_empty_body_leaves_the_new_profile_fields_alone() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_kate_id, kate_token) = register_and_login(&app, &mail, "kate@example.com", "kate").await;
+
+    let seed_response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &kate_token,
+            json!({
+                "status": "dnd",
+                "custom_status": { "text": "escribiendo", "emoji": "✍️" },
+                "links": [{ "label": "github", "url": "https://github.com/kate" }],
+                "visibility": { "bio": "private" },
+            }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(seed_response.status(), StatusCode::OK);
+
+    let empty_response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &kate_token,
+            json!({}),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(empty_response.status(), StatusCode::OK);
+
+    let reread = body_json(
+        app.oneshot(auth_request(Method::GET, "/api/v1/accounts/me", &kate_token))
+            .await
+            .expect("request succeeds"),
+    )
+    .await;
+    assert_eq!(reread["status"], "dnd");
+    assert_eq!(reread["custom_status"]["text"], "escribiendo");
+    assert_eq!(reread["custom_status"]["emoji"], "✍️");
+    assert_eq!(reread["links"].as_array().expect("links array").len(), 1);
+    assert_eq!(reread["links"][0]["label"], "github");
+    assert_eq!(reread["visibility"]["bio"], "private");
+    assert_eq!(reread["visibility"]["communities"], "friends");
+    assert_eq!(reread["visibility"]["friends"], "friends");
+}
+
+#[tokio::test]
+async fn patch_accounts_me_persists_status_custom_status_links_and_visibility() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_liam_id, liam_token) = register_and_login(&app, &mail, "liam@example.com", "liam").await;
+
+    let expires_at = (chrono::Utc::now() + chrono::TimeDelta::hours(2)).to_rfc3339();
+    let response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &liam_token,
+            json!({
+                "status": "idle",
+                "custom_status": {
+                    "text": "  en una reunión  ",
+                    "emoji": "📞",
+                    "expires_at": expires_at,
+                },
+                "links": [
+                    { "label": "github", "url": "https://github.com/liam" },
+                    { "label": "web", "url": "http://liam.example.com" },
+                ],
+                "visibility": {
+                    "bio": "friends",
+                    "communities": "private",
+                    "friends": "public",
+                },
+            }),
+        ))
+        .await
+        .expect("patch request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["status"], "idle");
+    // The text is stored trimmed.
+    assert_eq!(body["custom_status"]["text"], "en una reunión");
+    assert_eq!(body["custom_status"]["emoji"], "📞");
+    assert!(body["custom_status"]["expires_at"].is_string());
+    assert_eq!(body["links"][0]["label"], "github");
+    assert_eq!(body["links"][1]["url"], "http://liam.example.com");
+    assert_eq!(body["visibility"]["bio"], "friends");
+    assert_eq!(body["visibility"]["communities"], "private");
+    assert_eq!(body["visibility"]["friends"], "public");
+
+    let reread = body_json(
+        app.oneshot(auth_request(Method::GET, "/api/v1/accounts/me", &liam_token))
+            .await
+            .expect("request succeeds"),
+    )
+    .await;
+    assert_eq!(reread["status"], "idle");
+    assert_eq!(reread["custom_status"]["text"], "en una reunión");
+    assert_eq!(reread["links"].as_array().expect("links array").len(), 2);
+    assert_eq!(reread["links"][1]["label"], "web");
+    assert_eq!(reread["visibility"]["communities"], "private");
+}
+
+/// The text, the emoji, and the expiry are one setting: an explicit null
+/// clears all three, not just the field that carries the name.
+#[tokio::test]
+async fn patch_accounts_me_with_a_null_custom_status_clears_text_emoji_and_expiry() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_mia_id, mia_token) = register_and_login(&app, &mail, "mia@example.com", "mia").await;
+
+    let expires_at = (chrono::Utc::now() + chrono::TimeDelta::hours(3)).to_rfc3339();
+    let seed_response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &mia_token,
+            json!({
+                "custom_status": { "text": "afk", "emoji": "🌙", "expires_at": expires_at },
+            }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(seed_response.status(), StatusCode::OK);
+
+    let cleared_response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &mia_token,
+            json!({ "custom_status": null }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(cleared_response.status(), StatusCode::OK);
+    let cleared = body_json(cleared_response).await;
+    assert!(cleared["custom_status"].is_null());
+
+    let reread = body_json(
+        app.oneshot(auth_request(Method::GET, "/api/v1/accounts/me", &mia_token))
+            .await
+            .expect("request succeeds"),
+    )
+    .await;
+    assert!(
+        reread["custom_status"].is_null(),
+        "the emoji and expiry must not outlive the text they belong to"
+    );
+}
+
+#[tokio::test]
+async fn patch_accounts_me_rejects_a_status_outside_the_enum() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_noah_id, noah_token) = register_and_login(&app, &mail, "noah@example.com", "noah").await;
+
+    for status in ["offline", "away", "Online", ""] {
+        let response = app
+            .clone()
+            .oneshot(auth_json_request(
+                Method::PATCH,
+                "/api/v1/accounts/me",
+                &noah_token,
+                json!({ "status": status }),
+            ))
+            .await
+            .expect("patch request succeeds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn patch_accounts_me_rejects_a_visibility_outside_the_enum() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_olivia_id, olivia_token) =
+        register_and_login(&app, &mail, "olivia@example.com", "olivia").await;
+
+    for body in [
+        json!({ "visibility": { "bio": "everyone" } }),
+        json!({ "visibility": { "communities": "" } }),
+        json!({ "visibility": { "friends": "Public" } }),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(auth_json_request(
+                Method::PATCH,
+                "/api/v1/accounts/me",
+                &olivia_token,
+                body.clone(),
+            ))
+            .await
+            .expect("patch request succeeds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn patch_accounts_me_rejects_more_than_five_links() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_peter_id, peter_token) =
+        register_and_login(&app, &mail, "peter@example.com", "peter").await;
+
+    let six: Vec<Value> = (0..6)
+        .map(|n| json!({ "label": format!("link{n}"), "url": format!("https://example.com/{n}") }))
+        .collect();
+    let response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &peter_token,
+            json!({ "links": six }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let five: Vec<Value> = (0..5)
+        .map(|n| json!({ "label": format!("link{n}"), "url": format!("https://example.com/{n}") }))
+        .collect();
+    let accepted = app
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &peter_token,
+            json!({ "links": five }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(accepted.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn patch_accounts_me_rejects_a_link_that_is_not_http_or_https() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_quinn_id, quinn_token) =
+        register_and_login(&app, &mail, "quinn@example.com", "quinn").await;
+
+    for url in [
+        "javascript:alert(1)",
+        "ftp://example.com/file",
+        "data:text/html,<script>alert(1)</script>",
+        "not a url at all",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(auth_json_request(
+                Method::PATCH,
+                "/api/v1/accounts/me",
+                &quinn_token,
+                json!({ "links": [{ "label": "somewhere", "url": url }] }),
+            ))
+            .await
+            .expect("patch request succeeds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{url}");
+    }
+}
+
+#[tokio::test]
+async fn patch_accounts_me_rejects_an_empty_or_over_long_link_label() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_rosa_id, rosa_token) = register_and_login(&app, &mail, "rosa@example.com", "rosa").await;
+
+    for label in ["", "   ", &"a".repeat(33)] {
+        let response = app
+            .clone()
+            .oneshot(auth_json_request(
+                Method::PATCH,
+                "/api/v1/accounts/me",
+                &rosa_token,
+                json!({ "links": [{ "label": label, "url": "https://example.com" }] }),
+            ))
+            .await
+            .expect("patch request succeeds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{label:?}");
+    }
+}
+
+#[tokio::test]
+async fn patch_accounts_me_bounds_a_custom_status_expiry_to_the_next_day() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_sara_id, sara_token) = register_and_login(&app, &mail, "sara@example.com", "sara").await;
+
+    let past = (chrono::Utc::now() - chrono::TimeDelta::hours(1)).to_rfc3339();
+    let too_far = (chrono::Utc::now() + chrono::TimeDelta::hours(48)).to_rfc3339();
+    for expires_at in [past, too_far] {
+        let response = app
+            .clone()
+            .oneshot(auth_json_request(
+                Method::PATCH,
+                "/api/v1/accounts/me",
+                &sara_token,
+                json!({ "custom_status": { "text": "afk", "expires_at": expires_at } }),
+            ))
+            .await
+            .expect("patch request succeeds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{expires_at}");
+    }
+
+    let within = (chrono::Utc::now() + chrono::TimeDelta::hours(1)).to_rfc3339();
+    let accepted = app
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &sara_token,
+            json!({ "custom_status": { "text": "afk", "expires_at": within } }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let body = body_json(accepted).await;
+    assert_eq!(body["custom_status"]["text"], "afk");
+    assert!(body["custom_status"]["expires_at"].is_string());
+}
+
+/// A link set is replaced wholesale, never merged: the second patch's two
+/// links are the only ones left.
+#[tokio::test]
+async fn patch_accounts_me_replaces_the_whole_link_set() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_tom_id, tom_token) = register_and_login(&app, &mail, "tom@example.com", "tom").await;
+
+    let three = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &tom_token,
+            json!({ "links": [
+                { "label": "one", "url": "https://example.com/1" },
+                { "label": "two", "url": "https://example.com/2" },
+                { "label": "three", "url": "https://example.com/3" },
+            ] }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(three.status(), StatusCode::OK);
+    let three = body_json(three).await;
+    assert_eq!(three["links"].as_array().expect("links array").len(), 3);
+
+    let two = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &tom_token,
+            json!({ "links": [
+                { "label": "four", "url": "https://example.com/4" },
+                { "label": "five", "url": "https://example.com/5" },
+            ] }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(two.status(), StatusCode::OK);
+
+    let reread = body_json(
+        app.clone()
+            .oneshot(auth_request(Method::GET, "/api/v1/accounts/me", &tom_token))
+            .await
+            .expect("request succeeds"),
+    )
+    .await;
+    let links = reread["links"].as_array().expect("links array");
+    assert_eq!(links.len(), 2, "the previous set is gone, not merged");
+    assert_eq!(links[0]["label"], "four");
+    assert_eq!(links[1]["label"], "five");
+
+    let emptied = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &tom_token,
+            json!({ "links": [] }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(emptied.status(), StatusCode::OK);
+    let emptied = body_json(emptied).await;
+    assert!(emptied["links"].as_array().expect("links array").is_empty());
+}
+
+/// The same all-or-nothing guarantee the accent colour test fixes, extended
+/// to the profile fields that arrived later.
+#[tokio::test]
+async fn patch_accounts_me_applies_nothing_when_a_new_field_is_invalid() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_uma_id, uma_token) = register_and_login(&app, &mail, "uma@example.com", "uma").await;
+
+    let seed = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &uma_token,
+            json!({
+                "status": "dnd",
+                "links": [{ "label": "github", "url": "https://github.com/uma" }],
+            }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(seed.status(), StatusCode::OK);
+
+    // Every other field in this body is valid; the bad status must still
+    // stop all of them from landing.
+    let rejected = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &uma_token,
+            json!({
+                "status": "away",
+                "display_name": "Uma Updated",
+                "visibility": { "bio": "private" },
+                "links": [{ "label": "web", "url": "https://uma.example.com" }],
+            }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+    // A bad link in an otherwise valid body has to behave the same way.
+    let rejected_link = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &uma_token,
+            json!({
+                "display_name": "Uma Updated",
+                "links": [{ "label": "web", "url": "javascript:alert(1)" }],
+            }),
+        ))
+        .await
+        .expect("patch request succeeds");
+    assert_eq!(rejected_link.status(), StatusCode::BAD_REQUEST);
+
+    let reread = body_json(
+        app.oneshot(auth_request(Method::GET, "/api/v1/accounts/me", &uma_token))
+            .await
+            .expect("request succeeds"),
+    )
+    .await;
+    assert_eq!(reread["display_name"], "Test User");
+    assert_eq!(reread["status"], "dnd");
+    assert_eq!(reread["visibility"]["bio"], "public");
+    let links = reread["links"].as_array().expect("links array");
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0]["label"], "github");
+}

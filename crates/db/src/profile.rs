@@ -18,7 +18,7 @@ impl ProfileLinkInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct ProfileLinkRow {
     pub id: Uuid,
     pub label: String,
@@ -158,26 +158,43 @@ pub async fn get_profiles_bulk(
     Ok(profiles)
 }
 
-/// Replaces an account's complete ordered link set atomically. Link ids are
-/// generated in Rust before the delete and insert commit together.
+/// Reads one account's ordered profile links.
+pub async fn list_links<'e, E>(
+    executor: E,
+    account_id: Uuid,
+) -> Result<Vec<ProfileLinkRow>, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_as::<_, ProfileLinkRow>(
+        "SELECT id, label, url, position FROM account_profile_link \
+         WHERE account_id = $1 ORDER BY position",
+    )
+    .bind(account_id)
+    .fetch_all(executor)
+    .await
+}
+
+/// Replaces an account's complete ordered link set. Link ids are generated in
+/// Rust before the delete and insert. The caller supplies the connection, so
+/// the replacement commits with whatever else its transaction carries.
 pub async fn replace_links(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     account_id: Uuid,
     links: &[ProfileLinkInput],
 ) -> Result<(), sqlx::Error> {
     let ids: Vec<Uuid> = links.iter().map(|_| new_id()).collect();
     let labels: Vec<&str> = links.iter().map(|link| link.label.as_str()).collect();
     let urls: Vec<&str> = links.iter().map(|link| link.url.as_str()).collect();
-    let mut transaction = pool.begin().await?;
 
     sqlx::query_scalar::<_, Uuid>("SELECT id FROM account WHERE id = $1 FOR KEY SHARE")
         .bind(account_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut *conn)
         .await?;
 
     sqlx::query("DELETE FROM account_profile_link WHERE account_id = $1")
         .bind(account_id)
-        .execute(&mut *transaction)
+        .execute(&mut *conn)
         .await?;
     sqlx::query(
         "INSERT INTO account_profile_link (id, account_id, label, url, position) \
@@ -189,9 +206,8 @@ pub async fn replace_links(
     .bind(ids)
     .bind(labels)
     .bind(urls)
-    .execute(&mut *transaction)
+    .execute(&mut *conn)
     .await?;
-    transaction.commit().await?;
 
     Ok(())
 }
