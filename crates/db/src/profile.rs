@@ -196,6 +196,19 @@ pub async fn replace_links(
     Ok(())
 }
 
+/// Resolves an account id from an exact username. `account.username` is
+/// unique case-sensitively, so `Ada` and `ada` are distinct accounts and the
+/// match cannot be case-folded without becoming ambiguous.
+pub async fn find_id_by_username(
+    pool: &PgPool,
+    username: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>("SELECT id FROM account WHERE username = $1")
+        .bind(username)
+        .fetch_optional(pool)
+        .await
+}
+
 /// Resolves per-server profile context from the existing membership and role
 /// assignment repositories. A missing membership has no server context.
 pub async fn get_server_context(

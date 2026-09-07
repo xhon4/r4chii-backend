@@ -124,9 +124,10 @@ pub fn router(state: AppState) -> Router {
         .with_state(state.clone());
 
     // Accounts are not auth/recovery endpoints, so no rate limiting here.
-    // `/accounts/me` is registered as its own static route ahead of the
-    // `/accounts/{id}` dynamic route — axum's router prefers a static match
-    // over a param match, so "me" never falls into the `{id}` handler.
+    // `/accounts/me`, `/accounts/by-username/{username}` and `/accounts/bulk`
+    // are registered as static routes ahead of the `/accounts/{id}` dynamic
+    // route — axum's router prefers a static match over a param match, so none
+    // of them falls into the `{id}` handler.
     let unlimited = Router::new()
         .route("/api/v1/sessions", get(handlers::list_sessions))
         .route("/api/v1/sessions", delete(handlers::revoke_all_sessions))
@@ -138,6 +139,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/accounts/me", get(handlers::get_own_account))
         .route("/api/v1/accounts/me", patch(handlers::update_own_account))
+        .route(
+            "/api/v1/accounts/by-username/{username}",
+            get(handlers::get_account_by_username),
+        )
+        .route("/api/v1/accounts/bulk", post(handlers::get_accounts_bulk))
         .route("/api/v1/accounts/{id}", get(handlers::get_account))
         .route("/api/v1/servers", post(handlers::create_server))
         .route("/api/v1/servers", get(handlers::list_servers))

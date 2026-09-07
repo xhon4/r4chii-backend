@@ -213,3 +213,76 @@ async fn a_nonexistent_target_returns_account_not_found() {
 
     assert!(matches!(result, Err(DomainError::AccountNotFound)));
 }
+
+#[tokio::test]
+async fn bulk_gathers_the_same_relationship_facts_as_the_single_lookup() {
+    let (domain, auth, _pool, _container) = test_services().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+    let carol = register(&auth, "carol@example.com", "carol").await;
+    let dave = register(&auth, "dave@example.com", "dave").await;
+
+    domain.send_friend_request(alice, bob).await.unwrap();
+    domain.send_friend_request(bob, alice).await.unwrap();
+    domain.block_account(alice, carol).await.unwrap();
+    domain.block_account(dave, alice).await.unwrap();
+
+    let contexts = domain
+        .get_profile_contexts_bulk(alice, &[bob, carol, dave, alice])
+        .await
+        .unwrap();
+
+    assert_eq!(contexts.len(), 4);
+    assert_eq!(contexts[0].relationship, ProfileViewerRelationship::Friend);
+    assert!(contexts[1].caller_blocked_owner);
+    assert!(!contexts[1].owner_blocked_caller);
+    assert!(contexts[2].owner_blocked_caller);
+    assert!(!contexts[2].caller_blocked_owner);
+    assert_eq!(contexts[3].relationship, ProfileViewerRelationship::SelfView);
+
+    // Every entry must agree with what the single-account path reports.
+    for (context, target) in contexts.iter().zip([bob, carol, dave, alice]) {
+        let single = domain.get_profile_context(alice, target, None).await.unwrap();
+        assert_eq!(context.relationship, single.relationship);
+        assert_eq!(context.caller_blocked_owner, single.caller_blocked_owner);
+        assert_eq!(context.owner_blocked_caller, single.owner_blocked_caller);
+    }
+}
+
+#[tokio::test]
+async fn bulk_skips_ids_that_name_no_account_and_never_carries_server_context() {
+    let (domain, auth, _pool, _container) = test_services().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+
+    let contexts = domain
+        .get_profile_contexts_bulk(alice, &[bob, app_core::new_id()])
+        .await
+        .unwrap();
+
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].profile.id, bob);
+    assert!(contexts[0].server_context.is_none());
+    assert!(!contexts[0].has_shared_server_context);
+}
+
+#[tokio::test]
+async fn a_username_resolves_to_the_same_context_as_its_id() {
+    let (domain, auth, _pool, _container) = test_services().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+
+    let by_username = domain
+        .get_profile_context_by_username(alice, "bob", None)
+        .await
+        .unwrap();
+    assert_eq!(by_username.profile.id, bob);
+
+    let missing = domain
+        .get_profile_context_by_username(alice, "Bob", None)
+        .await;
+    assert!(
+        matches!(missing, Err(DomainError::AccountNotFound)),
+        "the lookup is exact; usernames are unique case-sensitively"
+    );
+}

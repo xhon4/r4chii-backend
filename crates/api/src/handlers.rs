@@ -16,13 +16,15 @@ use uuid::Uuid;
 use crate::{
     dto::{
         AccountResponse, BanListResponse, BanResponse, BlockListResponse, BlockResponse,
+        BulkProfilesRequest,
         ChannelListResponse, ChannelResponse, ChannelRolePermissionListResponse,
         ChannelRolePermissionResponse, CreateBanRequest, CreateBlockRequest,
         CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, CreateRoleRequest,
         CreateServerRequest, CreateThreadRequest, EditMessageRequest, ExportJobResponse,
         FriendshipListResponse, FriendshipResponse,
         LoginRequest, LoginResponse, MemberRolesResponse, MessageListQuery, MessageListResponse,
-        MessageResponse, MessageSearchQuery, ProfileQuery, ProfileResponse, RegisterRequest,
+        MessageResponse, MessageSearchQuery, ProfileQuery, ProfileResponse,
+        ProfileSummaryListResponse, ProfileSummaryResponse, RegisterRequest,
         ReorderRolesRequest,
         ResendCodeRequest, RoleListResponse, RoleResponse, SendFriendRequestRequest,
         SendMessageRequest, ServerListResponse, ServerMemberListResponse, ServerMemberResponse,
@@ -39,6 +41,10 @@ use crate::{
 /// Matches auth's idle sliding window (`verify_session`'s 14-day check) —
 /// the cookie should not outlive the session it carries.
 const SESSION_COOKIE_MAX_AGE_DAYS: i64 = 14;
+
+/// Upper bound on `POST /accounts/bulk`. Bounds the response size and the
+/// array bound into the repository's single set-based query.
+const MAX_BULK_PROFILE_IDS: usize = 100;
 
 /// Starts a registration: `POST /registrations`.
 ///
@@ -125,11 +131,42 @@ pub async fn get_account(
         .get_profile_context(context.account_id, account_id, query.server_id)
         .await?;
 
+    Ok(Json(
+        build_profile_response(&state, ctx, query.server_id).await,
+    ))
+}
+
+/// The same profile as `get_account`, addressed by username so a client can
+/// resolve a `/users/:username` URL without knowing the account id.
+pub async fn get_account_by_username(
+    State(state): State<AppState>,
+    AuthenticatedUser(context): AuthenticatedUser,
+    Path(username): Path<String>,
+    query: Result<Query<ProfileQuery>, QueryRejection>,
+) -> Result<Json<ProfileResponse>, ApiError> {
+    let Query(query) = query?;
+    let ctx = state
+        .domain
+        .get_profile_context_by_username(context.account_id, &username, query.server_id)
+        .await?;
+
+    Ok(Json(build_profile_response(&state, ctx, query.server_id).await))
+}
+
+/// Applies the visibility decision and resolves presence for one profile.
+/// Shared by the id and username routes so neither can drift from the other.
+async fn build_profile_response(
+    state: &AppState,
+    ctx: domain::ProfileContext,
+    server_id: Option<Uuid>,
+) -> ProfileResponse {
+    let account_id = ctx.profile.id;
     let decision = domain::decide_profile_visibility(ctx.visibility_input());
 
     // The folded exposure: a hidden presence never reaches the hub lookup.
-    let presence_exposure = decision.presence_for_status(&ctx.profile.status);
-    let online = if presence_exposure == domain::ProfilePresenceExposure::Real {
+    let online = if decision.presence_for_status(&ctx.profile.status)
+        == domain::ProfilePresenceExposure::Real
+    {
         state
             .realtime
             .presence_snapshot(&[account_id])
@@ -141,12 +178,59 @@ pub async fn get_account(
         false
     };
 
-    Ok(Json(ProfileResponse::build(
-        ctx,
-        decision,
-        online,
-        query.server_id,
-    )))
+    ProfileResponse::build(ctx, decision, online, server_id)
+}
+
+/// Hydrates many profiles at once for member lists and message authors.
+/// Reduced shape: no field here is gated by a visibility setting, so this
+/// never becomes a way to read what `get_account` would have withheld.
+pub async fn get_accounts_bulk(
+    State(state): State<AppState>,
+    AuthenticatedUser(context): AuthenticatedUser,
+    body: Result<Json<BulkProfilesRequest>, JsonRejection>,
+) -> Result<Json<ProfileSummaryListResponse>, ApiError> {
+    let Json(body) = body?;
+    if body.ids.len() > MAX_BULK_PROFILE_IDS {
+        return Err(ApiError::from(domain::DomainError::Validation(format!(
+            "at most {MAX_BULK_PROFILE_IDS} ids may be requested at once"
+        ))));
+    }
+
+    let contexts = state
+        .domain
+        .get_profile_contexts_bulk(context.account_id, &body.ids)
+        .await?;
+
+    let decided: Vec<(domain::ProfileContext, domain::ProfileVisibilityDecision)> = contexts
+        .into_iter()
+        .map(|ctx| {
+            let decision = domain::decide_profile_visibility(ctx.visibility_input());
+            (ctx, decision)
+        })
+        .collect();
+
+    // One registry read for the whole page, and only for the accounts whose
+    // presence is actually exposed — the rest are offline by decision.
+    let exposed: Vec<Uuid> = decided
+        .iter()
+        .filter(|(ctx, decision)| {
+            decision.presence_for_status(&ctx.profile.status)
+                == domain::ProfilePresenceExposure::Real
+        })
+        .map(|(ctx, _)| ctx.profile.id)
+        .collect();
+    let presence = state.realtime.presence_snapshot(&exposed).await;
+
+    Ok(Json(ProfileSummaryListResponse {
+        items: decided
+            .into_iter()
+            .map(|(ctx, decision)| {
+                let online = presence.get(&ctx.profile.id).copied()
+                    == Some(realtime::PresenceStatus::Online);
+                ProfileSummaryResponse::build(ctx, decision, online)
+            })
+            .collect(),
+    }))
 }
 
 /// The caller's own profile — self shape, includes email. This is the only

@@ -2470,6 +2470,78 @@ impl DomainService {
         })
     }
 
+    /// Resolves a username to the same context `get_profile_context` builds.
+    pub async fn get_profile_context_by_username(
+        &self,
+        caller_id: Uuid,
+        username: &str,
+        server_id: Option<Uuid>,
+    ) -> Result<ProfileContext, DomainError> {
+        let target_id = db::profile::find_id_by_username(&self.pool, username)
+            .await?
+            .ok_or(DomainError::AccountNotFound)?;
+        self.get_profile_context(caller_id, target_id, server_id)
+            .await
+    }
+
+    /// The same facts as `get_profile_context`, for many accounts at once.
+    /// The caller's relationship and block sets are each read once for the
+    /// whole page rather than per account, so the query count does not grow
+    /// with `target_ids`. Carries no server context. Accounts that do not
+    /// exist are absent from the result; the order of `target_ids` is kept.
+    pub async fn get_profile_contexts_bulk(
+        &self,
+        caller_id: Uuid,
+        target_ids: &[Uuid],
+    ) -> Result<Vec<ProfileContext>, DomainError> {
+        let profiles = db::profile::get_profiles_bulk(&self.pool, target_ids).await?;
+
+        let friends: HashSet<Uuid> = db::friendship::list_for_account(&self.pool, caller_id)
+            .await?
+            .into_iter()
+            .filter(|row| row.status == "accepted")
+            .map(|row| {
+                if row.account_low == caller_id {
+                    row.account_high
+                } else {
+                    row.account_low
+                }
+            })
+            .collect();
+        let caller_blocked: HashSet<Uuid> = db::block::list_for_account(&self.pool, caller_id)
+            .await?
+            .into_iter()
+            .map(|row| row.blocked_account_id)
+            .collect();
+        let blocked_caller: HashSet<Uuid> = db::block::blockers_of(&self.pool, caller_id)
+            .await?
+            .into_iter()
+            .collect();
+
+        Ok(profiles
+            .into_iter()
+            .map(|profile| {
+                let target_id = profile.id;
+                let relationship = if target_id == caller_id {
+                    crate::profile_visibility::ProfileViewerRelationship::SelfView
+                } else if friends.contains(&target_id) {
+                    crate::profile_visibility::ProfileViewerRelationship::Friend
+                } else {
+                    crate::profile_visibility::ProfileViewerRelationship::None
+                };
+
+                ProfileContext {
+                    profile,
+                    relationship,
+                    caller_blocked_owner: caller_blocked.contains(&target_id),
+                    owner_blocked_caller: blocked_caller.contains(&target_id),
+                    server_context: None,
+                    has_shared_server_context: false,
+                }
+            })
+            .collect())
+    }
+
     /// Shared channel-access gate for every message method: a caller may
     /// only act on a channel if they hold a `membership` row for its server
     /// (`text` channels) or a `channel_member` row for the channel itself

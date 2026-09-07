@@ -958,3 +958,204 @@ async fn the_profile_and_member_list_agree_about_an_account_that_blocked_you() {
     );
 }
 
+
+#[tokio::test]
+async fn bulk_hydrates_many_profiles_and_preserves_the_requested_order() {
+    let (app, mail, hub, _container) = test_app().await;
+    let (alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+    let (carol_id, _carol_token) =
+        register_and_login(&app, &mail, "carol@example.com", "carol").await;
+
+    app.clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &bob_token,
+            json!({ "avatar_url": "https://example.com/bob.png" }),
+        ))
+        .await
+        .expect("avatar update succeeds");
+    let (_handle, _receiver) = hub.register(bob_id.parse().expect("uuid")).await;
+
+    let response = app
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/accounts/bulk",
+            &alice_token,
+            json!({ "ids": [carol_id, bob_id, alice_id] }),
+        ))
+        .await
+        .expect("bulk request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let items = body_json(response).await;
+    let items = items["items"].as_array().expect("items array").clone();
+    let ids: Vec<&str> = items
+        .iter()
+        .map(|item| item["id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(ids, vec![carol_id.as_str(), bob_id.as_str(), alice_id.as_str()]);
+
+    let bob = &items[1];
+    assert_eq!(bob["avatar_url"], "https://example.com/bob.png");
+    assert_eq!(bob["presence"]["online"], true);
+    assert_eq!(items[0]["presence"]["online"], false);
+    // The reduced shape carries nothing a visibility setting gates.
+    for absent in ["bio", "pronouns", "links", "custom_status", "server_context"] {
+        assert!(
+            bob.get(absent).is_none(),
+            "the summary shape must not carry {absent}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bulk_rejects_more_than_a_hundred_ids() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+
+    let ids: Vec<String> = (0..101).map(|_| Uuid::now_v7().to_string()).collect();
+    let response = app
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/accounts/bulk",
+            &alice_token,
+            json!({ "ids": ids }),
+        ))
+        .await
+        .expect("bulk request succeeds");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// The reduced shape must not become a way around the profile endpoint: a
+/// deleted account is a tombstone here too, and a live connection behind an
+/// `invisible` preference still reads offline.
+#[tokio::test]
+async fn bulk_applies_the_same_visibility_decision_as_the_profile() {
+    let (app, mail, hub, container) = test_app().await;
+    let (_alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+    let (carol_id, carol_token) =
+        register_and_login(&app, &mail, "carol@example.com", "carol").await;
+
+    for (token, url) in [
+        (&bob_token, "https://example.com/bob.png"),
+        (&carol_token, "https://example.com/carol.png"),
+    ] {
+        app.clone()
+            .oneshot(auth_json_request(
+                Method::PATCH,
+                "/api/v1/accounts/me",
+                token,
+                json!({ "avatar_url": url }),
+            ))
+            .await
+            .expect("avatar update succeeds");
+    }
+
+    let pool = direct_pool(&container).await;
+    sqlx::query("UPDATE account SET deleted_at = now() WHERE id = $1")
+        .bind(bob_id.parse::<Uuid>().expect("uuid"))
+        .execute(&pool)
+        .await
+        .expect("deleted_at updates");
+    sqlx::query("UPDATE account SET status = 'invisible' WHERE id = $1")
+        .bind(carol_id.parse::<Uuid>().expect("uuid"))
+        .execute(&pool)
+        .await
+        .expect("status updates");
+
+    let (_bob_handle, _bob_rx) = hub.register(bob_id.parse().expect("uuid")).await;
+    let (_carol_handle, _carol_rx) = hub.register(carol_id.parse().expect("uuid")).await;
+
+    let response = app
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/accounts/bulk",
+            &alice_token,
+            json!({ "ids": [bob_id, carol_id] }),
+        ))
+        .await
+        .expect("bulk request succeeds");
+
+    let items = body_json(response).await;
+    let items = items["items"].as_array().expect("items array").clone();
+
+    let bob = &items[0];
+    assert_eq!(bob["display_name"], "Deleted User");
+    assert!(bob["avatar_url"].is_null());
+    assert_eq!(bob["presence"]["online"], false);
+    assert_eq!(bob["flags"]["deleted"], true);
+
+    let carol = &items[1];
+    assert_eq!(carol["username"], "carol");
+    assert_eq!(
+        carol["avatar_url"], "https://example.com/carol.png",
+        "an invisible account is not otherwise redacted"
+    );
+    assert_eq!(
+        carol["presence"]["status"], "offline",
+        "an invisible account reads offline in the reduced shape too"
+    );
+    assert_eq!(carol["presence"]["online"], false);
+}
+
+#[tokio::test]
+async fn a_profile_can_be_fetched_by_username_and_matches_the_id_route() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    let by_username = app
+        .clone()
+        .oneshot(auth_request(
+            Method::GET,
+            "/api/v1/accounts/by-username/bob",
+            &alice_token,
+        ))
+        .await
+        .expect("request succeeds");
+    assert_eq!(by_username.status(), StatusCode::OK);
+    let by_username = body_json(by_username).await;
+
+    let by_id = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{bob_id}"),
+            &alice_token,
+        ))
+        .await
+        .expect("request succeeds");
+    let by_id = body_json(by_id).await;
+
+    assert_eq!(by_username, by_id, "both routes answer with the same profile");
+    assert_eq!(by_username["username"], "bob");
+}
+
+/// `account.username` is unique case-sensitively, so folding case in the
+/// lookup would be ambiguous the moment two such accounts exist.
+#[tokio::test]
+async fn the_username_lookup_is_exact_and_missing_usernames_are_404() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (_alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (_bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    for uri in [
+        "/api/v1/accounts/by-username/Bob",
+        "/api/v1/accounts/by-username/nobody",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(auth_request(Method::GET, uri, &alice_token))
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+}

@@ -128,6 +128,79 @@ pub struct ProfileResponse {
     flags: ProfileFlagsResponse,
 }
 
+/// Body of `POST /accounts/bulk`. The id cap is enforced in the handler.
+#[derive(Debug, Deserialize)]
+pub struct BulkProfilesRequest {
+    pub ids: Vec<Uuid>,
+}
+
+/// The reduced profile shape for hydrating member lists and message authors:
+/// enough to render a name, an avatar and a presence dot, and nothing that a
+/// visibility setting gates. Same construction rule as [`ProfileResponse`] —
+/// private fields, one constructor, no way in from a raw row.
+#[derive(Debug, Serialize)]
+pub struct ProfileSummaryResponse {
+    id: Uuid,
+    username: String,
+    display_name: String,
+    avatar_url: Option<String>,
+    accent_color: Option<String>,
+    presence: ProfilePresenceResponse,
+    flags: ProfileFlagsResponse,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileSummaryListResponse {
+    pub items: Vec<ProfileSummaryResponse>,
+}
+
+impl ProfileSummaryResponse {
+    /// Maps the subset of `decision` this shape can carry. Fields gated by a
+    /// visibility setting are not in the shape at all, so identity, media and
+    /// presence are the only exposures that apply.
+    pub(crate) fn build(
+        ctx: domain::ProfileContext,
+        decision: domain::ProfileVisibilityDecision,
+        online: bool,
+    ) -> Self {
+        let profile = ctx.profile;
+
+        let display_name = match decision.identity {
+            domain::ProfileIdentityExposure::Tombstone => "Deleted User".to_string(),
+            domain::ProfileIdentityExposure::Visible => profile.display_name,
+        };
+
+        let (avatar_url, accent_color) = match decision.media {
+            domain::ProfileMediaExposure::Actual => (profile.avatar_url, profile.accent_color),
+            domain::ProfileMediaExposure::Default => (None, None),
+        };
+
+        let presence = match decision.presence_for_status(&profile.status) {
+            domain::ProfilePresenceExposure::Real => ProfilePresenceResponse {
+                status: profile.status,
+                online,
+            },
+            domain::ProfilePresenceExposure::ForcedOffline => ProfilePresenceResponse {
+                status: "offline".to_string(),
+                online: false,
+            },
+        };
+
+        Self {
+            id: profile.id,
+            username: profile.username,
+            display_name,
+            avatar_url,
+            accent_color,
+            presence,
+            flags: ProfileFlagsResponse {
+                deleted: decision.identity == domain::ProfileIdentityExposure::Tombstone,
+                system: false,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProfileLinkResponse {
     pub label: String,
