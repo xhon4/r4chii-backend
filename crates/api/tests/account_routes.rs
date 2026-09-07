@@ -884,3 +884,87 @@ async fn patch_accounts_me_rejects_an_invalid_accent_color_and_writes_nothing() 
     // partially applied either.
     assert_eq!(reread["display_name"], "Test User");
 }
+
+/// Pins a known and currently unresolved gap rather than asserting it is
+/// desirable: the profile masks an inbound block, and the member list of a
+/// server both accounts belong to does not, so comparing the two responses
+/// reveals the block that the profile's masking exists to hide.
+///
+/// The masking rules of the two endpoints are independent by construction —
+/// the member list masks presence for accounts the *viewer* blocked, the
+/// profile masks for accounts that blocked the *viewer*. Closing the gap is a
+/// product decision, not a defect to patch here. This test fails the moment
+/// either side changes, which is the point: the change should be deliberate.
+#[tokio::test]
+async fn the_member_list_still_reveals_an_inbound_block_the_profile_masks() {
+    let (app, mail, _hub, _container) = test_app().await;
+    let (alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    let server = create_server(&app, &alice_token).await;
+    let server_id = server["id"].as_str().expect("server id");
+    join_server(
+        &app,
+        &bob_token,
+        server["invite_code"].as_str().expect("invite code"),
+    )
+    .await;
+
+    app.clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &bob_token,
+            json!({ "avatar_url": "https://example.com/bob.png" }),
+        ))
+        .await
+        .expect("avatar update succeeds");
+    app.clone()
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/blocks",
+            &bob_token,
+            json!({ "account_id": alice_id }),
+        ))
+        .await
+        .expect("block request succeeds");
+
+    let profile = app
+        .clone()
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/accounts/{bob_id}"),
+            &alice_token,
+        ))
+        .await
+        .expect("profile request succeeds");
+    let profile = body_json(profile).await;
+
+    let members = app
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/servers/{server_id}/members"),
+            &alice_token,
+        ))
+        .await
+        .expect("member list request succeeds");
+    let members = body_json(members).await;
+    let member = members["items"]
+        .as_array()
+        .expect("member list")
+        .iter()
+        .find(|member| member["account_id"] == bob_id)
+        .expect("bob member")
+        .clone();
+
+    assert!(
+        profile["avatar_url"].is_null(),
+        "the profile masks media for an inbound block"
+    );
+    assert_eq!(
+        member["avatar_url"], "https://example.com/bob.png",
+        "the member list does not — this difference is what discloses the block"
+    );
+}
+
