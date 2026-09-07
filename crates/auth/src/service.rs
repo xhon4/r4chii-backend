@@ -241,10 +241,17 @@ impl AuthService {
         // "already registered" would turn this endpoint into the enumeration
         // oracle that login is careful never to be — which is exactly why
         // its check, below, stays *after* the hash.
+        // Compared normalized, matching the unique index: a name differing
+        // only in case or compatibility form is taken, and reporting that here
+        // is what keeps the failure at registration rather than at
+        // verification, after a code has already been sent.
         let username_taken = sqlx::query_as::<_, AccountIdRow>(
-            "SELECT id FROM account WHERE username = $1 \
+            "SELECT id FROM account \
+             WHERE username_normalized = lower(normalize($1, NFKC)) \
              UNION ALL \
-             SELECT id FROM pending_registration WHERE username = $1 AND expires_at > now()",
+             SELECT id FROM pending_registration \
+             WHERE lower(normalize(username, NFKC)) = lower(normalize($1, NFKC)) \
+               AND expires_at > now()",
         )
         .bind(&input.username)
         .fetch_optional(&self.pool)
@@ -1091,10 +1098,10 @@ fn map_promotion_conflict(err: sqlx::Error, reuse: PromotionReuse) -> AuthError 
     if let sqlx::Error::Database(db_err) = &err {
         if db_err.is_unique_violation() {
             match (db_err.constraint(), reuse) {
-                (Some("account_username_key"), PromotionReuse::Registration) => {
+                (Some("account_username_normalized_key"), PromotionReuse::Registration) => {
                     return AuthError::UsernameTakenDuringVerification
                 }
-                (Some("account_username_key"), PromotionReuse::Direct) => {
+                (Some("account_username_normalized_key"), PromotionReuse::Direct) => {
                     return AuthError::UsernameTaken
                 }
                 (Some("account_email_key"), _) => return AuthError::EmailTaken,
@@ -1109,7 +1116,7 @@ fn map_account_conflict(err: sqlx::Error) -> AuthError {
     if let sqlx::Error::Database(db_err) = &err {
         if db_err.is_unique_violation() {
             match db_err.constraint() {
-                Some("account_username_key") => return AuthError::UsernameTaken,
+                Some("account_username_normalized_key") => return AuthError::UsernameTaken,
                 Some("account_email_key") => return AuthError::EmailTaken,
                 _ => {}
             }

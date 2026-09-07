@@ -1138,26 +1138,38 @@ async fn a_profile_can_be_fetched_by_username_and_matches_the_id_route() {
     assert_eq!(by_username["username"], "bob");
 }
 
-/// `account.username` is unique case-sensitively, so folding case in the
-/// lookup would be ambiguous the moment two such accounts exist.
+/// A username identifies an account, so the casing and compatibility form a
+/// URL happens to carry do not change who it resolves to.
 #[tokio::test]
-async fn the_username_lookup_is_exact_and_missing_usernames_are_404() {
+async fn the_username_lookup_ignores_case_and_missing_usernames_are_404() {
     let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
-    let (_bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+    let (bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
     for uri in [
+        "/api/v1/accounts/by-username/bob",
         "/api/v1/accounts/by-username/Bob",
-        "/api/v1/accounts/by-username/nobody",
+        "/api/v1/accounts/by-username/BOB",
     ] {
         let response = app
             .clone()
             .oneshot(auth_request(Method::GET, uri, &alice_token))
             .await
             .expect("request succeeds");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        assert_eq!(body_json(response).await["id"], bob_id, "{uri}");
     }
+
+    let missing = app
+        .oneshot(auth_request(
+            Method::GET,
+            "/api/v1/accounts/by-username/nobody",
+            &alice_token,
+        ))
+        .await
+        .expect("request succeeds");
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
 /// An empty patch changes nothing, including the profile fields that arrived

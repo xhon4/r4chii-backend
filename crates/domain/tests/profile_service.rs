@@ -278,11 +278,17 @@ async fn a_username_resolves_to_the_same_context_as_its_id() {
         .unwrap();
     assert_eq!(by_username.profile.id, bob);
 
-    let missing = domain
-        .get_profile_context_by_username(alice, "Bob", None)
-        .await;
-    assert!(
-        matches!(missing, Err(DomainError::AccountNotFound)),
-        "the lookup is exact; usernames are unique case-sensitively"
+    let by_other_casing = domain
+        .get_profile_context_by_username(alice, "BoB", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        by_other_casing.profile.id, bob,
+        "casing identifies nobody; the normalized column does"
     );
+
+    let missing = domain
+        .get_profile_context_by_username(alice, "nobody", None)
+        .await;
+    assert!(matches!(missing, Err(DomainError::AccountNotFound)));
 }

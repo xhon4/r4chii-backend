@@ -212,14 +212,17 @@ pub async fn replace_links(
     Ok(())
 }
 
-/// Resolves an account id from an exact username. `account.username` is
-/// unique case-sensitively, so `Ada` and `ada` are distinct accounts and the
-/// match cannot be case-folded without becoming ambiguous.
+/// Resolves an account id from a username, compared against the normalized
+/// column that carries the unique index. Casing and compatibility forms
+/// resolve to the same account; the input is normalized by the same two
+/// functions that generate the column, so there is one implementation.
 pub async fn find_id_by_username(
     pool: &PgPool,
     username: &str,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>("SELECT id FROM account WHERE username = $1")
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM account WHERE username_normalized = lower(normalize($1, NFKC))",
+    )
         .bind(username)
         .fetch_optional(pool)
         .await

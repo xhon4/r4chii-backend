@@ -3,6 +3,35 @@ use testcontainers_modules::{
     testcontainers::{runners::AsyncRunner, ImageExt},
 };
 
+/// A migrated database in a fresh container.
+async fn test_pool() -> (
+    db::PgPool,
+    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+) {
+    let container = Postgres::default()
+        // postgres:16, the tag production runs (docker-compose.yml).
+        // The crate default is 11-alpine: five majors and a different
+        // libc away from the database this schema is deployed on.
+        .with_tag("16")
+        .start()
+        .await
+        .expect("postgres container starts");
+
+    let host = container.get_host().await.expect("container host");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("container port");
+    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+
+    let pool = db::build_pool(&database_url)
+        .await
+        .expect("pool connects");
+    db::run_migrations(&pool).await.expect("migrations run");
+
+    (pool, container)
+}
+
 #[tokio::test]
 async fn migrations_create_core_tables() {
     let container = Postgres::default()
@@ -170,4 +199,74 @@ async fn migrations_create_core_tables() {
         invalid_custom_status.is_err(),
         "custom statuses longer than 128 characters must be rejected"
     );
+}
+
+#[tokio::test]
+async fn a_username_identifies_an_account_regardless_of_case_or_compatibility_form() {
+    let (pool, _container) = test_pool().await;
+
+    sqlx::query(
+        "INSERT INTO account (id, username, email, display_name) VALUES \
+         ('00000000-0000-0000-0000-000000000018', 'CaseTest', \
+          'case@example.com', 'Case Test')",
+    )
+    .execute(&pool)
+    .await
+    .expect("account inserts");
+
+    let normalized: (String,) =
+        sqlx::query_as("SELECT username_normalized FROM account WHERE username = 'CaseTest'")
+            .fetch_one(&pool)
+            .await
+            .expect("generated column is readable");
+    assert_eq!(
+        normalized.0, "casetest",
+        "the generated column folds case without touching the display value"
+    );
+
+    for (index, clash) in ["casetest", "CASETEST", "ＣａｓｅＴｅｓｔ"].iter().enumerate() {
+        let result = sqlx::query(
+            "INSERT INTO account (id, username, email, display_name) \
+             VALUES ($1, $2, $3, 'Clash')",
+        )
+        .bind(app_core::new_id())
+        .bind(clash)
+        .bind(format!("clash{index}@example.com"))
+        .execute(&pool)
+        .await;
+        assert!(
+            result.is_err(),
+            "`{clash}` must collide with the existing account"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_custom_emoji_is_bounded_in_bytes() {
+    let (pool, _container) = test_pool().await;
+
+    sqlx::query(
+        "INSERT INTO account (id, username, email, display_name) VALUES \
+         ('00000000-0000-0000-0000-000000000019', 'emoji-bound', \
+          'emoji@example.com', 'Emoji Bound')",
+    )
+    .execute(&pool)
+    .await
+    .expect("account inserts");
+
+    // A four-person family with skin tone modifiers: 41 bytes, and one
+    // character to a reader.
+    let widest = "👨🏻\u{200D}👩🏽\u{200D}👧🏾\u{200D}👦🏿";
+    assert!(widest.len() <= 64, "the ceiling must clear a real sequence");
+    sqlx::query("UPDATE account SET custom_emoji = $1 WHERE username = 'emoji-bound'")
+        .bind(widest)
+        .execute(&pool)
+        .await
+        .expect("a real emoji sequence fits");
+
+    let result = sqlx::query("UPDATE account SET custom_emoji = $1 WHERE username = 'emoji-bound'")
+        .bind("a".repeat(65))
+        .execute(&pool)
+        .await;
+    assert!(result.is_err(), "past the ceiling the check must reject");
 }
