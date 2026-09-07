@@ -90,6 +90,23 @@ pub fn router(state: AppState) -> Router {
         .finish()
         .expect("moderation rate limit config is valid (non-zero period and burst)");
 
+    // Editing your own profile is a write, and a person doing it saves a few
+    // times in a row while adjusting things — hence a burst with a slow
+    // replenish, rather than the auth group's brute-force tuning.
+    let profile_write_config: GovernorConfig<
+        PeerIpKeyExtractor,
+        governor::middleware::NoOpMiddleware<governor::clock::QuantaInstant>,
+    > = GovernorConfigBuilder::default()
+        .per_second(3)
+        .burst_size(5)
+        .finish()
+        .expect("profile write rate limit config is valid (non-zero period and burst)");
+
+    let profile_writes = Router::new()
+        .route("/api/v1/accounts/me", patch(handlers::update_own_account))
+        .layer(GovernorLayer::new(profile_write_config).error_handler(rate_limit::error_response))
+        .with_state(state.clone());
+
     let moderation = Router::new()
         .route(
             "/api/v1/servers/{id}/members/{account_id}",
@@ -123,7 +140,8 @@ pub fn router(state: AppState) -> Router {
         .layer(GovernorLayer::new(moderation_config).error_handler(rate_limit::error_response))
         .with_state(state.clone());
 
-    // Accounts are not auth/recovery endpoints, so no rate limiting here.
+    // Account reads are not auth/recovery endpoints, so no rate limiting
+    // here; the profile write is registered in its own group above.
     // `/accounts/me`, `/accounts/by-username/{username}` and `/accounts/bulk`
     // are registered as static routes ahead of the `/accounts/{id}` dynamic
     // route — axum's router prefers a static match over a param match, so none
@@ -138,7 +156,6 @@ pub fn router(state: AppState) -> Router {
             get(voice::get_server_voice_rosters),
         )
         .route("/api/v1/accounts/me", get(handlers::get_own_account))
-        .route("/api/v1/accounts/me", patch(handlers::update_own_account))
         .route(
             "/api/v1/accounts/by-username/{username}",
             get(handlers::get_account_by_username),
@@ -283,6 +300,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .merge(rate_limited)
+        .merge(profile_writes)
         .merge(moderation)
         .merge(unlimited)
         // Server-rendered, unauthenticated, no shared `AppState`
