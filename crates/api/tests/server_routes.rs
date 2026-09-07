@@ -17,6 +17,7 @@ use tower::ServiceExt;
 async fn test_app() -> (
     axum::Router,
     mailer::CaptureMailer,
+    realtime::Hub,
     testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
 ) {
     let container = Postgres::default()
@@ -47,8 +48,9 @@ async fn test_app() -> (
         domain: domain.clone(),
         realtime: realtime::Hub::new(domain),
     };
+    let hub = state.realtime.clone();
 
-    (api::router(state), mail, container)
+    (api::router(state), mail, hub, container)
 }
 
 // Same rationale as crates/api/tests/auth_routes.rs: the register/login
@@ -200,7 +202,7 @@ async fn create_server(app: &axum::Router, token: &str, name: &str) -> Value {
 
 #[tokio::test]
 async fn creating_a_server_makes_the_creator_the_owner_with_an_invite_code() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
 
     let server = create_server(&app, &alice_token, "Alice's Place").await;
@@ -212,7 +214,7 @@ async fn creating_a_server_makes_the_creator_the_owner_with_an_invite_code() {
 
 #[tokio::test]
 async fn creating_a_server_with_an_empty_name_returns_400() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
 
     let response = app
@@ -232,7 +234,7 @@ async fn creating_a_server_with_an_empty_name_returns_400() {
 
 #[tokio::test]
 async fn a_non_member_getting_a_server_gets_404_not_403() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (_bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
@@ -255,7 +257,7 @@ async fn a_non_member_getting_a_server_gets_404_not_403() {
 
 #[tokio::test]
 async fn a_non_member_cannot_create_a_channel_in_a_server_they_are_not_in() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (_bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
@@ -279,7 +281,7 @@ async fn a_non_member_cannot_create_a_channel_in_a_server_they_are_not_in() {
 
 #[tokio::test]
 async fn a_non_member_cannot_list_channels_in_a_server_they_are_not_in() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (_bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
@@ -302,7 +304,7 @@ async fn a_non_member_cannot_list_channels_in_a_server_they_are_not_in() {
 
 #[tokio::test]
 async fn list_servers_for_one_account_never_includes_a_server_only_another_account_is_in() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (_bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
@@ -323,7 +325,7 @@ async fn list_servers_for_one_account_never_includes_a_server_only_another_accou
 
 #[tokio::test]
 async fn joining_with_an_invalid_invite_code_returns_404() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
     let response = app
@@ -343,7 +345,7 @@ async fn joining_with_an_invalid_invite_code_returns_404() {
 
 #[tokio::test]
 async fn joining_a_server_already_a_member_of_returns_409() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (_bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
@@ -381,7 +383,7 @@ async fn joining_a_server_already_a_member_of_returns_409() {
 
 #[tokio::test]
 async fn invite_code_is_present_for_the_owner_and_absent_for_a_plain_member() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (_bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
@@ -428,7 +430,7 @@ async fn invite_code_is_present_for_the_owner_and_absent_for_a_plain_member() {
 
 #[tokio::test]
 async fn creating_a_channel_then_listing_channels_returns_the_expected_fields() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
 
     let server = create_server(&app, &alice_token, "Alice's Place").await;
@@ -470,7 +472,7 @@ async fn creating_a_channel_then_listing_channels_returns_the_expected_fields() 
 
 #[tokio::test]
 async fn servers_and_channels_routes_require_authentication() {
-    let (app, _mail, _container) = test_app().await;
+    let (app, _mail, _hub, _container) = test_app().await;
 
     let response = app
         .oneshot(
@@ -486,7 +488,7 @@ async fn servers_and_channels_routes_require_authentication() {
 
 #[tokio::test]
 async fn list_members_returns_members_with_roles_and_no_email() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
@@ -542,7 +544,7 @@ async fn list_members_returns_members_with_roles_and_no_email() {
 
 #[tokio::test]
 async fn list_members_by_a_non_member_returns_404_server_not_found() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (_mallory_id, mallory_token) =
         register_and_login(&app, &mail, "mallory@example.com", "mallory").await;
@@ -567,7 +569,7 @@ async fn list_members_by_a_non_member_returns_404_server_not_found() {
 
 #[tokio::test]
 async fn list_members_without_a_session_is_unauthenticated() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let server = create_server(&app, &alice_token, "Alice's Place").await;
     let server_id = server["id"].as_str().expect("server id");
@@ -590,7 +592,7 @@ async fn list_members_without_a_session_is_unauthenticated() {
 
 #[tokio::test]
 async fn create_channel_accepts_an_explicit_voice_kind_and_defaults_to_text() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let server = create_server(&app, &alice_token, "Alice's Place").await;
     let server_id = server["id"].as_str().expect("server id");
@@ -627,7 +629,7 @@ async fn create_channel_accepts_an_explicit_voice_kind_and_defaults_to_text() {
 
 #[tokio::test]
 async fn create_channel_rejects_an_unsupported_kind_with_400() {
-    let (app, mail, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let server = create_server(&app, &alice_token, "Alice's Place").await;
     let server_id = server["id"].as_str().expect("server id");
@@ -656,13 +658,13 @@ async fn create_channel_rejects_an_unsupported_kind_with_400() {
 
 #[tokio::test]
 async fn a_blocked_members_status_reports_offline_to_the_blocker_regardless_of_real_presence() {
-    // "a block hides the blocked user's social presence from the blocker"
-    // — never enforced anywhere until now. There is no gateway
-    // socket in this test harness, so "real presence" here is simply
-    // whatever the unconnected default is (Offline); the assertion that
-    // matters is that a blocked member's status is masked independently of
-    // that lookup, not derived from it.
-    let (app, mail, _container) = test_app().await;
+    // "a block hides the blocked user's social presence from the blocker".
+    //
+    // The blocked member holds a live hub connection, so their real presence
+    // is Online and the masked and unmasked answers actually differ. Without
+    // that registration the account is Offline anyway and this test passes
+    // whether or not the masking exists at all.
+    let (app, mail, hub, _container) = test_app().await;
     let (_alice_id, alice_token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
@@ -688,6 +690,32 @@ async fn a_blocked_members_status_reports_offline_to_the_blocker_regardless_of_r
         ))
         .await
         .expect("block succeeds");
+
+    let bob_uuid: uuid::Uuid = bob_id.parse().expect("bob id is a uuid");
+    let (_handle, _receiver) = hub.register(bob_uuid).await;
+
+    // Alice blocked bob, so bob reads offline to her. Bob did not block
+    // alice, so the masking must not be reciprocal: alice stays online to him.
+    let control = app
+        .clone()
+        .oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/servers/{server_id}/members"),
+            &bob_token,
+        ))
+        .await
+        .expect("members request succeeds");
+    let control = body_json(control).await;
+    let bob_to_himself = control["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .find(|m| m["account_id"] == bob_id)
+        .expect("bob listed");
+    assert_eq!(
+        bob_to_himself["status"], "online",
+        "the live connection is real — the blocker's view is what masks it"
+    );
 
     let response = app
         .oneshot(auth_request(
