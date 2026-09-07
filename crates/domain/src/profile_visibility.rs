@@ -145,20 +145,6 @@ fn field_exposure(
     }
 }
 
-fn minimum_profile_decision() -> ProfileVisibilityDecision {
-    ProfileVisibilityDecision {
-        identity: ProfileIdentityExposure::Visible,
-        media: ProfileMediaExposure::Default,
-        bio_pronouns_and_links: ProfileFieldExposure::Hidden,
-        communities: ProfileFieldExposure::Hidden,
-        friends: ProfileFieldExposure::Hidden,
-        custom_status: ProfileFieldExposure::Hidden,
-        presence: ProfilePresenceExposure::ForcedOffline,
-        server_context: ProfileFieldExposure::Hidden,
-        relationship: ProfileRelationshipExposure::Minimum,
-    }
-}
-
 fn deleted_profile_decision() -> ProfileVisibilityDecision {
     ProfileVisibilityDecision {
         identity: ProfileIdentityExposure::Tombstone,
@@ -175,24 +161,34 @@ fn deleted_profile_decision() -> ProfileVisibilityDecision {
 
 /// Resolves profile visibility without fetching rows, constructing API DTOs, or mutating state.
 ///
-/// Precedence is deleted account, inbound block, then ordinary relationship. An outbound block
-/// remains distinguishable in relationship exposure but uses no-relationship field visibility.
+/// A deleted account is a tombstone and outranks every relationship fact. Past that, a block is an
+/// interaction boundary, not a secrecy boundary: it never redacts profile data the caller could
+/// otherwise read. It only degrades the pair to no relationship for the visibility-gated fields —
+/// which the data already guarantees, since placing a block deletes the friendship row — and
+/// withholds the direction of an inbound block from the relationship exposure.
+///
+/// Concealing an inbound block by redacting avatars, presence, or server context was tried and
+/// abandoned: presence and identity remain visible through the member list of any shared server, so
+/// the redaction advertised the block instead of hiding it while making the profile lie about data
+/// the caller was entitled to.
 pub fn decide_profile_visibility(input: ProfileVisibilityInput) -> ProfileVisibilityDecision {
     if input.is_deleted {
         return deleted_profile_decision();
     }
 
-    if input.owner_blocked_caller {
-        return minimum_profile_decision();
-    }
-
-    let effective_relationship = if input.caller_blocked_owner {
+    let effective_relationship = if input.caller_blocked_owner || input.owner_blocked_caller {
         ProfileViewerRelationship::None
     } else {
         input.relationship
     };
+    // An outbound block is reported plainly: the caller placed it, so naming it
+    // discloses nothing they do not already know. Checking it first matters —
+    // reporting a mutual block as `Minimum` would tell a caller who knows they
+    // blocked the owner that the owner blocked them back.
     let relationship = if input.caller_blocked_owner {
         ProfileRelationshipExposure::Blocked
+    } else if input.owner_blocked_caller {
+        ProfileRelationshipExposure::Minimum
     } else {
         match input.relationship {
             ProfileViewerRelationship::SelfView => ProfileRelationshipExposure::SelfView,
@@ -337,9 +333,14 @@ mod tests {
         }
     }
 
+    /// A block controls interaction, not readability: everything the caller
+    /// could already read stays readable, and only the direction of the block
+    /// is withheld. Redacting here would advertise the block rather than hide
+    /// it, since the same account stays fully visible in the member list of
+    /// any server both accounts belong to.
     #[test]
-    fn inbound_block_masks_a_friend_even_with_shared_server_context() {
-        let mut policy_input = input(ProfileViewerRelationship::Friend);
+    fn an_inbound_block_withholds_its_direction_without_redacting_readable_data() {
+        let mut policy_input = input(ProfileViewerRelationship::None);
         policy_input.vis_bio = ProfileVisibility::Public;
         policy_input.vis_communities = ProfileVisibility::Public;
         policy_input.vis_friends = ProfileVisibility::Public;
@@ -349,36 +350,62 @@ mod tests {
         let decision = decide_profile_visibility(policy_input);
 
         assert_eq!(decision.identity, ProfileIdentityExposure::Visible);
-        assert_eq!(decision.media, ProfileMediaExposure::Default);
+        assert_eq!(decision.media, ProfileMediaExposure::Actual);
         assert_eq!(
             decision.bio_pronouns_and_links,
-            ProfileFieldExposure::Hidden
+            ProfileFieldExposure::Visible
         );
-        assert_eq!(decision.communities, ProfileFieldExposure::Hidden);
-        assert_eq!(decision.friends, ProfileFieldExposure::Hidden);
-        assert_eq!(decision.custom_status, ProfileFieldExposure::Hidden);
-        assert_eq!(decision.presence, ProfilePresenceExposure::ForcedOffline);
-        assert_eq!(decision.server_context, ProfileFieldExposure::Hidden);
-        assert_eq!(decision.relationship, ProfileRelationshipExposure::Minimum);
+        assert_eq!(decision.communities, ProfileFieldExposure::Visible);
+        assert_eq!(decision.friends, ProfileFieldExposure::Visible);
+        assert_eq!(decision.custom_status, ProfileFieldExposure::Visible);
+        assert_eq!(decision.presence, ProfilePresenceExposure::Real);
+        assert_eq!(decision.server_context, ProfileFieldExposure::Visible);
+        assert_eq!(
+            decision.relationship,
+            ProfileRelationshipExposure::Minimum,
+            "the one thing an inbound block withholds is that it exists"
+        );
     }
 
+    /// `friends`-gated fields still close, because a block deletes the
+    /// friendship row — the pair genuinely is unrelated afterwards. This is
+    /// not redaction to conceal the block; it is the real relationship.
     #[test]
-    fn mutual_block_keeps_inbound_minimum_masking_precedence() {
+    fn an_inbound_block_leaves_no_friends_only_field_open() {
         let mut policy_input = input(ProfileViewerRelationship::Friend);
-        policy_input.vis_bio = ProfileVisibility::Public;
-        policy_input.caller_blocked_owner = true;
+        policy_input.vis_bio = ProfileVisibility::Friends;
         policy_input.owner_blocked_caller = true;
-        policy_input.has_shared_server_context = true;
 
         let decision = decide_profile_visibility(policy_input);
 
-        assert_eq!(decision.media, ProfileMediaExposure::Default);
         assert_eq!(
             decision.bio_pronouns_and_links,
             ProfileFieldExposure::Hidden
         );
-        assert_eq!(decision.server_context, ProfileFieldExposure::Hidden);
-        assert_eq!(decision.relationship, ProfileRelationshipExposure::Minimum);
+    }
+
+    /// A caller who blocked the owner already knows it. Reporting a mutual
+    /// block as `Minimum` would answer "none" to someone expecting "blocked",
+    /// and that difference is itself a disclosure of the inbound block.
+    #[test]
+    fn a_mutual_block_reports_the_callers_own_outbound_block() {
+        let mut policy_input = input(ProfileViewerRelationship::None);
+        policy_input.caller_blocked_owner = true;
+        policy_input.owner_blocked_caller = true;
+
+        let decision = decide_profile_visibility(policy_input);
+
+        assert_eq!(decision.relationship, ProfileRelationshipExposure::Blocked);
+        assert_eq!(
+            decide_profile_visibility(ProfileVisibilityInput {
+                caller_blocked_owner: true,
+                owner_blocked_caller: false,
+                ..policy_input
+            })
+            .relationship,
+            ProfileRelationshipExposure::Blocked,
+            "an outbound block reads the same whether or not it is reciprocated"
+        );
     }
 
     #[test]
@@ -459,12 +486,12 @@ mod tests {
         );
     }
 
-    /// An inbound block already forces offline; the invisible fold must not
-    /// quietly turn that back into a real presence read for any status value.
+    /// A tombstone already forces offline; the invisible fold must not quietly
+    /// turn that back into a real presence read for any status value.
     #[test]
     fn folding_status_never_widens_an_already_forced_offline_decision() {
         let decision = decide_profile_visibility(ProfileVisibilityInput {
-            owner_blocked_caller: true,
+            is_deleted: true,
             ..input(ProfileViewerRelationship::Friend)
         });
 
@@ -477,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn server_context_requires_shared_membership_and_is_masked_by_inbound_block_or_deletion() {
+    fn server_context_requires_shared_membership_and_is_masked_only_by_deletion() {
         let cases = [
             (
                 input(ProfileViewerRelationship::SelfView),
@@ -509,13 +536,16 @@ mod tests {
                 },
                 ProfileFieldExposure::Visible,
             ),
+            // Neither direction of block closes server context: shared
+            // membership is a fact both accounts can already see in the member
+            // list, so hiding it here would only signal the block.
             (
                 ProfileVisibilityInput {
                     has_shared_server_context: true,
                     owner_blocked_caller: true,
                     ..input(ProfileViewerRelationship::Friend)
                 },
-                ProfileFieldExposure::Hidden,
+                ProfileFieldExposure::Visible,
             ),
             (
                 ProfileVisibilityInput {

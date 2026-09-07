@@ -370,8 +370,7 @@ async fn get_account_you_blocked_reports_blocked_relationship() {
 /// `ForcedOffline`/`Hidden` verdict rather than reading the real presence
 /// and profile data it has on hand.
 #[tokio::test]
-async fn an_inbound_block_hides_presence_custom_status_and_relationship_even_with_a_live_connection(
-) {
+async fn an_inbound_block_withholds_only_its_own_existence() {
     let (app, mail, hub, _container) = test_app().await;
     let (alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
@@ -423,12 +422,19 @@ async fn an_inbound_block_hides_presence_custom_status_and_relationship_even_wit
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_json(response).await;
-    assert_eq!(body["relationship"], "none");
-    assert!(body["avatar_url"].is_null());
-    assert_eq!(body["presence"]["status"], "offline");
-    assert_eq!(body["presence"]["online"], false);
-    assert!(body["custom_status"].is_null());
-    assert!(body.get("server_context").is_none());
+    assert_eq!(
+        body["relationship"], "none",
+        "the response must never name an inbound block"
+    );
+    assert_eq!(
+        body["avatar_url"], "https://example.com/bob.png",
+        "public identity is not redacted to conceal a block"
+    );
+    assert_eq!(body["presence"]["online"], true);
+    assert!(
+        body.get("server_context").is_some(),
+        "shared membership is already visible in the member list"
+    );
 }
 
 #[tokio::test]
@@ -885,18 +891,17 @@ async fn patch_accounts_me_rejects_an_invalid_accent_color_and_writes_nothing() 
     assert_eq!(reread["display_name"], "Test User");
 }
 
-/// Pins a known and currently unresolved gap rather than asserting it is
-/// desirable: the profile masks an inbound block, and the member list of a
-/// server both accounts belong to does not, so comparing the two responses
-/// reveals the block that the profile's masking exists to hide.
+/// The profile and the member list of a shared server must agree about an
+/// account that blocked the caller. They disagreed while the profile redacted
+/// media and presence to conceal an inbound block: the member list showed the
+/// real values, so diffing the two responses announced the block that the
+/// redaction existed to hide.
 ///
-/// The masking rules of the two endpoints are independent by construction —
-/// the member list masks presence for accounts the *viewer* blocked, the
-/// profile masks for accounts that blocked the *viewer*. Closing the gap is a
-/// product decision, not a defect to patch here. This test fails the moment
-/// either side changes, which is the point: the change should be deliberate.
+/// Blocking is an interaction boundary, not a secrecy boundary — the profile
+/// no longer redacts readable data for it, and this test is what keeps the two
+/// surfaces from drifting apart again.
 #[tokio::test]
-async fn the_member_list_still_reveals_an_inbound_block_the_profile_masks() {
+async fn the_profile_and_member_list_agree_about_an_account_that_blocked_you() {
     let (app, mail, _hub, _container) = test_app().await;
     let (alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
@@ -958,13 +963,15 @@ async fn the_member_list_still_reveals_an_inbound_block_the_profile_masks() {
         .expect("bob member")
         .clone();
 
-    assert!(
-        profile["avatar_url"].is_null(),
-        "the profile masks media for an inbound block"
-    );
     assert_eq!(
-        member["avatar_url"], "https://example.com/bob.png",
-        "the member list does not — this difference is what discloses the block"
+        profile["avatar_url"], member["avatar_url"],
+        "a difference between the two surfaces is what discloses the block"
+    );
+    assert_eq!(profile["avatar_url"], "https://example.com/bob.png");
+    assert_eq!(profile["display_name"], member["display_name"]);
+    assert_eq!(
+        profile["relationship"], "none",
+        "agreeing on the data must not extend to naming the block"
     );
 }
 
