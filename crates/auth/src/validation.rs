@@ -4,6 +4,7 @@
 //! `AuthError::Validation` to a 400 response.
 
 use chrono::{DateTime, TimeDelta, Utc};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::error::AuthError;
 
@@ -218,7 +219,11 @@ const MAX_CUSTOM_STATUS_LEN: usize = 128;
 
 /// No database constraint bounds the emoji column. This is a defensive cap,
 /// wide enough for a composed sequence joined by zero-width joiners.
-const MAX_CUSTOM_EMOJI_LEN: usize = 16;
+/// A byte ceiling, not a length rule — the length rule is one grapheme
+/// cluster. This only bounds the input before it is segmented. The widest
+/// real sequences run to about 41 bytes (a four-person family with skin tone
+/// modifiers), so this leaves room without admitting arbitrary text.
+const MAX_CUSTOM_EMOJI_BYTES: usize = 64;
 
 /// How far ahead a manual status may be scheduled to clear itself.
 const MAX_CUSTOM_STATUS_TTL_HOURS: i64 = 24;
@@ -285,16 +290,26 @@ pub(crate) fn sanitize_custom_status_emoji(emoji: &str) -> Result<Option<String>
         return Ok(None);
     }
 
-    if trimmed.chars().count() > MAX_CUSTOM_EMOJI_LEN {
+    // Bounded before segmenting, so an oversized input is rejected without
+    // walking it.
+    if trimmed.len() > MAX_CUSTOM_EMOJI_BYTES {
         return Err(AuthError::Validation(format!(
-            "custom status emoji must be at most {MAX_CUSTOM_EMOJI_LEN} characters, \
-             a defensive bound rather than a contract limit"
+            "custom status emoji must be at most {MAX_CUSTOM_EMOJI_BYTES} bytes"
         )));
     }
 
     if trimmed.chars().any(char::is_control) {
         return Err(AuthError::Validation(
             "custom status emoji must not contain control characters".to_string(),
+        ));
+    }
+
+    // One emoji is one grapheme cluster, whatever its codepoint count: a
+    // regional flag runs to seven codepoints and a family with skin tone
+    // modifiers to eleven, and both are a single character to a reader.
+    if trimmed.graphemes(true).count() != 1 {
+        return Err(AuthError::Validation(
+            "custom status emoji must be a single character".to_string(),
         ));
     }
 
@@ -643,9 +658,24 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_custom_status_emoji_rejects_over_the_defensive_bound() {
-        assert!(sanitize_custom_status_emoji(&"a".repeat(MAX_CUSTOM_EMOJI_LEN)).is_ok());
-        assert!(sanitize_custom_status_emoji(&"a".repeat(MAX_CUSTOM_EMOJI_LEN + 1)).is_err());
+    fn sanitize_custom_status_emoji_accepts_wide_single_grapheme_sequences() {
+        for wide in ["\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}", "👨🏻\u{200D}👩🏽\u{200D}👧🏾\u{200D}👦🏿"] {
+            assert!(
+                sanitize_custom_status_emoji(wide).is_ok(),
+                "{wide} is one grapheme cluster"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_custom_status_emoji_rejects_more_than_one_character() {
+        assert!(sanitize_custom_status_emoji("ab").is_err());
+        assert!(sanitize_custom_status_emoji("👩‍💻👩‍💻").is_err());
+    }
+
+    #[test]
+    fn sanitize_custom_status_emoji_rejects_over_the_byte_ceiling() {
+        assert!(sanitize_custom_status_emoji(&"a".repeat(MAX_CUSTOM_EMOJI_BYTES + 1)).is_err());
     }
 
     #[test]
