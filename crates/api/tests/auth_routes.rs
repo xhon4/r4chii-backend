@@ -1,56 +1,15 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use axum::{
     body::Body,
     extract::ConnectInfo,
     http::{header, Method, Request, StatusCode},
 };
-use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
 use tower::ServiceExt;
 
-async fn test_app() -> (
-    axum::Router,
-    mailer::CaptureMailer,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url)
-        .await
-        .expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-
-    let mail = mailer::CaptureMailer::new();
-    let domain = domain::DomainService::new(pool.clone());
-    let state = api::AppState {
-        auth: auth::AuthService::new(pool, std::sync::Arc::new(mail.clone())),
-        domain: domain.clone(),
-        realtime: realtime::Hub::new(domain),
-        storage: None,
-    };
-
-    (api::router(state), mail, container)
-}
+mod common;
+use common::*;
 
 // The register/login routes sit behind tower-governor's PeerIpKeyExtractor,
 // which reads `ConnectInfo<SocketAddr>` from the request extensions (set in
@@ -58,58 +17,11 @@ async fn test_app() -> (
 // under `oneshot`). Each call below is given a distinct fake peer address so
 // tests exercise many rapid register/login calls without tripping the
 // secure() preset's 2-requests-per-4-seconds burst limit.
-static NEXT_IP_OCTETS: AtomicU32 = AtomicU32::new(1);
-
-fn next_peer_addr() -> SocketAddr {
-    let n = NEXT_IP_OCTETS.fetch_add(1, Ordering::Relaxed);
-    let ip = Ipv4Addr::new(10, (n >> 16) as u8, (n >> 8) as u8, n as u8);
-    SocketAddr::new(IpAddr::V4(ip), 0)
-}
-
-fn request(method: Method, uri: &str) -> http::request::Builder {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .extension(ConnectInfo(next_peer_addr()))
-}
-
-fn json_request(method: Method, uri: &str, body: Value) -> Request<Body> {
-    request(method, uri)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body.to_string()))
-        .expect("request builds")
-}
 
 fn empty_request(method: Method, uri: &str) -> Request<Body> {
     request(method, uri)
         .body(Body::empty())
         .expect("request builds")
-}
-
-async fn body_json(response: axum::response::Response) -> Value {
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body collects")
-        .to_bytes();
-    serde_json::from_slice(&bytes).expect("body is valid JSON")
-}
-
-fn register_body(email: &str, username: &str) -> Value {
-    json!({
-        "email": email,
-        "username": username,
-        "password": "correct horse battery staple",
-        "display_name": "Test User",
-    })
-}
-
-fn login_body(email: &str) -> Value {
-    json!({
-        "email": email,
-        "password": "correct horse battery staple",
-    })
 }
 
 /// Pulls the code out of the most recent captured mail.

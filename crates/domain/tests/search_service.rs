@@ -1,61 +1,13 @@
 //! Full-text search over a server's messages. Same harness as
 //! `domain_service.rs`.
 
-use app_core::Uuid;
-use auth::{AuthService, RegisterInput};
 use domain::{
-    CreateChannelInput, CreateServerInput, DomainError, DomainService, SearchInput,
+    CreateChannelInput, CreateServerInput, DomainError, SearchInput,
     SendMessageInput,
 };
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
 
-async fn test_services() -> (
-    DomainService,
-    AuthService,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url)
-        .await
-        .expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-
-    (
-        DomainService::new(pool.clone()),
-        AuthService::new(pool, std::sync::Arc::new(mailer::CaptureMailer::new())),
-        container,
-    )
-}
-
-async fn register(auth: &AuthService, email: &str, username: &str) -> Uuid {
-    auth.create_verified_account(RegisterInput {
-        email: email.to_string(),
-        username: username.to_string(),
-        password: "correct horse battery staple".to_string(),
-        display_name: "Test User".to_string(),
-    })
-    .await
-    .expect("registration succeeds")
-    .id
-}
+mod common;
+use common::*;
 
 #[tokio::test]
 async fn search_finds_a_message_by_word_and_ignores_unrelated_ones() {

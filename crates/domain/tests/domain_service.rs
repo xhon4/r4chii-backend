@@ -1,61 +1,7 @@
-use app_core::Uuid;
-use auth::{AuthService, RegisterInput};
-use domain::{CreateChannelInput, CreateServerInput, DomainError, DomainService};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
+use domain::{CreateChannelInput, CreateServerInput, DomainError};
 
-async fn test_services() -> (
-    DomainService,
-    AuthService,
-    db::PgPool,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url)
-        .await
-        .expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-
-    (
-        DomainService::new(pool.clone()),
-        AuthService::new(pool.clone(), std::sync::Arc::new(mailer::CaptureMailer::new())),
-        pool,
-        container,
-    )
-}
-
-fn register_input(email: &str, username: &str) -> RegisterInput {
-    RegisterInput {
-        email: email.to_string(),
-        username: username.to_string(),
-        password: "correct horse battery staple".to_string(),
-        display_name: "Test User".to_string(),
-    }
-}
-
-async fn register(auth: &AuthService, email: &str, username: &str) -> Uuid {
-    auth.create_verified_account(register_input(email, username))
-        .await
-        .expect("registration succeeds")
-        .id
-}
+mod common;
+use common::*;
 
 fn create_server_input(name: &str) -> CreateServerInput {
     CreateServerInput {
@@ -66,7 +12,7 @@ fn create_server_input(name: &str) -> CreateServerInput {
 
 #[tokio::test]
 async fn create_server_makes_the_creator_the_owner_with_a_visible_invite_code() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let server = domain
@@ -89,7 +35,7 @@ async fn create_server_makes_the_creator_the_owner_with_a_visible_invite_code() 
 
 #[tokio::test]
 async fn create_server_rejects_an_empty_name() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let result = domain.create_server(alice, create_server_input("")).await;
@@ -99,7 +45,7 @@ async fn create_server_rejects_an_empty_name() {
 
 #[tokio::test]
 async fn create_server_rejects_an_invalid_visibility() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let result = domain
@@ -117,7 +63,7 @@ async fn create_server_rejects_an_invalid_visibility() {
 
 #[tokio::test]
 async fn get_server_returns_404_equivalent_for_a_non_member() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -133,7 +79,7 @@ async fn get_server_returns_404_equivalent_for_a_non_member() {
 
 #[tokio::test]
 async fn get_server_returns_server_not_found_for_a_nonexistent_id() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let result = domain.get_server(alice, app_core::new_id()).await;
@@ -143,7 +89,7 @@ async fn get_server_returns_server_not_found_for_a_nonexistent_id() {
 
 #[tokio::test]
 async fn get_server_hides_the_invite_code_from_a_plain_member() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -172,7 +118,7 @@ async fn get_server_hides_the_invite_code_from_a_plain_member() {
 
 #[tokio::test]
 async fn list_servers_never_includes_a_server_only_another_account_belongs_to() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -191,7 +137,7 @@ async fn list_servers_never_includes_a_server_only_another_account_belongs_to() 
 
 #[tokio::test]
 async fn list_servers_includes_a_server_the_caller_joined_without_the_invite_code() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -224,7 +170,7 @@ async fn list_servers_includes_a_server_the_caller_joined_without_the_invite_cod
 
 #[tokio::test]
 async fn create_channel_by_a_non_member_returns_server_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -249,7 +195,7 @@ async fn create_channel_by_a_non_member_returns_server_not_found() {
 
 #[tokio::test]
 async fn create_channel_rejects_once_the_server_hits_the_channel_cap() {
-    let (domain, auth, pool, _container) = test_services().await;
+    let (domain, auth, pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let server = domain
@@ -281,7 +227,7 @@ async fn create_channel_rejects_once_the_server_hits_the_channel_cap() {
 
 #[tokio::test]
 async fn list_channels_by_a_non_member_returns_server_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -297,7 +243,7 @@ async fn list_channels_by_a_non_member_returns_server_not_found() {
 
 #[tokio::test]
 async fn create_channel_then_list_channels_returns_the_expected_fields() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let server = domain
@@ -333,7 +279,7 @@ async fn create_channel_then_list_channels_returns_the_expected_fields() {
 
 #[tokio::test]
 async fn create_channel_rejects_an_empty_name() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let server = domain
@@ -357,7 +303,7 @@ async fn create_channel_rejects_an_empty_name() {
 
 #[tokio::test]
 async fn join_via_invite_with_an_unknown_code_returns_invalid_invite() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
     let result = domain.join_via_invite(bob, "doesnotexist").await;
@@ -367,7 +313,7 @@ async fn join_via_invite_with_an_unknown_code_returns_invalid_invite() {
 
 #[tokio::test]
 async fn join_via_invite_adds_a_membership_row_for_the_joiner() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -393,7 +339,7 @@ async fn join_via_invite_adds_a_membership_row_for_the_joiner() {
 
 #[tokio::test]
 async fn join_via_invite_when_already_a_member_returns_conflict_and_does_not_duplicate() {
-    let (domain, auth, pool, _container) = test_services().await;
+    let (domain, auth, pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -428,7 +374,7 @@ async fn join_via_invite_when_already_a_member_returns_conflict_and_does_not_dup
 
 #[tokio::test]
 async fn list_members_returns_every_member_with_their_role() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -468,7 +414,7 @@ async fn list_members_returns_every_member_with_their_role() {
 
 #[tokio::test]
 async fn list_members_by_a_non_member_returns_server_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let mallory = register(&auth, "mallory@example.com", "mallory").await;
 
@@ -484,7 +430,7 @@ async fn list_members_by_a_non_member_returns_server_not_found() {
 
 #[tokio::test]
 async fn list_members_for_a_nonexistent_server_returns_server_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let result = domain.list_members(alice, app_core::new_id()).await;
@@ -494,7 +440,7 @@ async fn list_members_for_a_nonexistent_server_returns_server_not_found() {
 
 #[tokio::test]
 async fn create_channel_defaults_to_a_text_channel() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let server = domain
@@ -520,7 +466,7 @@ async fn create_channel_defaults_to_a_text_channel() {
 
 #[tokio::test]
 async fn create_channel_accepts_a_voice_kind() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let server = domain
@@ -546,7 +492,7 @@ async fn create_channel_accepts_a_voice_kind() {
 
 #[tokio::test]
 async fn create_channel_rejects_a_kind_that_is_not_text_or_voice() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let server = domain
@@ -577,7 +523,7 @@ async fn create_channel_rejects_a_kind_that_is_not_text_or_voice() {
 
 #[tokio::test]
 async fn a_voice_channel_is_authorized_by_server_membership_like_a_text_channel() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let mallory = register(&auth, "mallory@example.com", "mallory").await;
@@ -632,7 +578,7 @@ async fn a_voice_channel_is_authorized_by_server_membership_like_a_text_channel(
 
 #[tokio::test]
 async fn voice_channels_appear_in_list_channels() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let server = domain

@@ -1,65 +1,12 @@
 use app_core::Uuid;
-use auth::{AuthService, RegisterInput};
-use domain::{CreateGroupDmInput, DomainError, DomainService, SendMessageInput};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
+use domain::{CreateGroupDmInput, DomainError, SendMessageInput};
 
-async fn test_services() -> (
-    DomainService,
-    AuthService,
-    db::PgPool,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url)
-        .await
-        .expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-
-    (
-        DomainService::new(pool.clone()),
-        AuthService::new(pool.clone(), std::sync::Arc::new(mailer::CaptureMailer::new())),
-        pool,
-        container,
-    )
-}
-
-fn register_input(email: &str, username: &str) -> RegisterInput {
-    RegisterInput {
-        email: email.to_string(),
-        username: username.to_string(),
-        password: "correct horse battery staple".to_string(),
-        display_name: "Test User".to_string(),
-    }
-}
-
-async fn register(auth: &AuthService, email: &str, username: &str) -> Uuid {
-    auth.create_verified_account(register_input(email, username))
-        .await
-        .expect("registration succeeds")
-        .id
-}
+mod common;
+use common::*;
 
 #[tokio::test]
 async fn create_dm_creates_a_new_dm_channel_with_both_participants() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -84,7 +31,7 @@ async fn create_dm_creates_a_new_dm_channel_with_both_participants() {
 
 #[tokio::test]
 async fn create_dm_is_idempotent_regardless_of_argument_order() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -109,7 +56,7 @@ async fn create_dm_is_idempotent_regardless_of_argument_order() {
 // leaving two "the" DM between alice and bob instead of one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_create_dm_never_creates_duplicate_channels() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -148,7 +95,7 @@ async fn concurrent_create_dm_never_creates_duplicate_channels() {
 
 #[tokio::test]
 async fn create_dm_with_yourself_is_rejected() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let result = domain.create_dm(alice, alice).await;
@@ -158,7 +105,7 @@ async fn create_dm_with_yourself_is_rejected() {
 
 #[tokio::test]
 async fn create_dm_with_a_nonexistent_account_returns_account_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let result = domain.create_dm(alice, app_core::new_id()).await;
@@ -168,7 +115,7 @@ async fn create_dm_with_a_nonexistent_account_returns_account_not_found() {
 
 #[tokio::test]
 async fn messages_can_be_sent_in_a_dm_and_are_invisible_to_non_participants() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let carol = register(&auth, "carol@example.com", "carol").await;
@@ -201,7 +148,7 @@ async fn messages_can_be_sent_in_a_dm_and_are_invisible_to_non_participants() {
 
 #[tokio::test]
 async fn create_group_dm_adds_the_creator_and_every_participant() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let carol = register(&auth, "carol@example.com", "carol").await;
@@ -230,7 +177,7 @@ async fn create_group_dm_adds_the_creator_and_every_participant() {
 
 #[tokio::test]
 async fn create_group_dm_dedupes_the_creator_and_repeated_ids() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let carol = register(&auth, "carol@example.com", "carol").await;
@@ -254,7 +201,7 @@ async fn create_group_dm_dedupes_the_creator_and_repeated_ids() {
 
 #[tokio::test]
 async fn create_group_dm_requires_at_least_two_other_participants() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -272,7 +219,7 @@ async fn create_group_dm_requires_at_least_two_other_participants() {
 
 #[tokio::test]
 async fn create_group_dm_with_a_nonexistent_participant_returns_account_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -290,7 +237,7 @@ async fn create_group_dm_with_a_nonexistent_participant_returns_account_not_foun
 
 #[tokio::test]
 async fn list_dms_returns_only_the_callers_dm_and_group_dm_channels() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let carol = register(&auth, "carol@example.com", "carol").await;

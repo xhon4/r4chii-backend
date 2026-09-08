@@ -1,64 +1,11 @@
 use app_core::Uuid;
-use auth::{AuthService, RegisterInput};
 use domain::{
     ChannelSummary, CreateChannelInput, CreateServerInput, DomainError, DomainService,
     EditMessageInput, MessagePagination, SendMessageInput, ServerSummary,
 };
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
 
-async fn test_services() -> (
-    DomainService,
-    AuthService,
-    db::PgPool,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url)
-        .await
-        .expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-
-    (
-        DomainService::new(pool.clone()),
-        AuthService::new(pool.clone(), std::sync::Arc::new(mailer::CaptureMailer::new())),
-        pool,
-        container,
-    )
-}
-
-fn register_input(email: &str, username: &str) -> RegisterInput {
-    RegisterInput {
-        email: email.to_string(),
-        username: username.to_string(),
-        password: "correct horse battery staple".to_string(),
-        display_name: "Test User".to_string(),
-    }
-}
-
-async fn register(auth: &AuthService, email: &str, username: &str) -> Uuid {
-    auth.create_verified_account(register_input(email, username))
-        .await
-        .expect("registration succeeds")
-        .id
-}
+mod common;
+use common::*;
 
 /// Registers `alice` and creates a server + text channel she owns, ready to
 /// send messages into.
@@ -97,7 +44,7 @@ fn send_input(content: &str) -> SendMessageInput {
 
 #[tokio::test]
 async fn send_message_by_a_non_member_returns_channel_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
@@ -111,7 +58,7 @@ async fn send_message_by_a_non_member_returns_channel_not_found() {
 
 #[tokio::test]
 async fn list_messages_by_a_non_member_returns_channel_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
@@ -125,7 +72,7 @@ async fn list_messages_by_a_non_member_returns_channel_not_found() {
 
 #[tokio::test]
 async fn edit_message_by_a_non_member_returns_channel_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
@@ -146,7 +93,7 @@ async fn edit_message_by_a_non_member_returns_channel_not_found() {
 
 #[tokio::test]
 async fn delete_message_by_a_non_member_returns_channel_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
@@ -163,7 +110,7 @@ async fn delete_message_by_a_non_member_returns_channel_not_found() {
 
 #[tokio::test]
 async fn send_message_rejects_empty_content() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
 
@@ -174,7 +121,7 @@ async fn send_message_rejects_empty_content() {
 
 #[tokio::test]
 async fn editing_someone_elses_message_returns_403_equivalent_and_leaves_it_unmodified() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let (server, channel) = server_and_channel(&domain, alice).await;
@@ -212,7 +159,7 @@ async fn editing_someone_elses_message_returns_403_equivalent_and_leaves_it_unmo
 
 #[tokio::test]
 async fn deleting_someone_elses_message_returns_403_equivalent_and_leaves_it_unmodified() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let (server, channel) = server_and_channel(&domain, alice).await;
@@ -252,7 +199,7 @@ async fn deleting_someone_elses_message_returns_403_equivalent_and_leaves_it_unm
 
 #[tokio::test]
 async fn editing_a_message_that_does_not_exist_in_the_channel_returns_message_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
 
@@ -272,7 +219,7 @@ async fn editing_a_message_that_does_not_exist_in_the_channel_returns_message_no
 
 #[tokio::test]
 async fn deleting_a_message_that_does_not_exist_in_the_channel_returns_message_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
 
@@ -285,7 +232,7 @@ async fn deleting_a_message_that_does_not_exist_in_the_channel_returns_message_n
 
 #[tokio::test]
 async fn a_message_belonging_to_a_different_channel_is_not_editable_here() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let (server, channel_a) = server_and_channel(&domain, alice).await;
     let channel_b = domain
@@ -323,7 +270,7 @@ async fn a_message_belonging_to_a_different_channel_is_not_editable_here() {
 
 #[tokio::test]
 async fn edit_message_updates_content_and_sets_edited_at() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
 
@@ -351,7 +298,7 @@ async fn edit_message_updates_content_and_sets_edited_at() {
 
 #[tokio::test]
 async fn a_soft_deleted_message_stays_in_list_results_with_null_content() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
 
@@ -378,7 +325,7 @@ async fn a_soft_deleted_message_stays_in_list_results_with_null_content() {
 
 #[tokio::test]
 async fn editing_or_deleting_an_already_deleted_message_returns_message_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
 
@@ -410,7 +357,7 @@ async fn editing_or_deleting_an_already_deleted_message_returns_message_not_foun
 
 #[tokio::test]
 async fn cursor_pagination_pages_backward_with_no_duplicates_or_gaps() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
 
@@ -455,7 +402,7 @@ async fn cursor_pagination_pages_backward_with_no_duplicates_or_gaps() {
 
 #[tokio::test]
 async fn list_messages_limit_is_capped_at_100() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let (_server, channel) = server_and_channel(&domain, alice).await;
 
@@ -482,7 +429,7 @@ async fn list_messages_limit_is_capped_at_100() {
 
 #[tokio::test]
 async fn authorized_account_ids_for_a_text_channel_returns_all_server_members() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let (server, channel) = server_and_channel(&domain, alice).await;
@@ -506,7 +453,7 @@ async fn authorized_account_ids_for_a_text_channel_returns_all_server_members() 
 
 #[tokio::test]
 async fn accessible_channel_ids_includes_channels_of_every_server_the_account_is_in() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let (server, channel) = server_and_channel(&domain, alice).await;
@@ -530,7 +477,7 @@ async fn accessible_channel_ids_includes_channels_of_every_server_the_account_is
 /// this test exists so that stays true on purpose.
 #[tokio::test]
 async fn messages_work_in_a_voice_channel_exactly_like_a_text_channel() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let mallory = register(&auth, "mallory@example.com", "mallory").await;
 

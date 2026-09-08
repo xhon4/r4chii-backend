@@ -34,5 +34,5 @@ test-support = []
 auth = { path = ".", features = ["test-support"] }
 app-core = { version = "0.1.0", path = "../core" }
 mailer = { version = "0.1.0", path = "../mailer" }
-testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+test-support = { version = "0.1.0", path = "../test-support" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }

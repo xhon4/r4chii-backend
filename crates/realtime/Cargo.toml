@@ -21,5 +21,5 @@ auth = { version = "0.1.0", path = "../auth", features = ["test-support"] }
 mailer = { version = "0.1.0", path = "../mailer" }
 db = { version = "0.1.0", path = "../db" }
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-rustls", "postgres"] }
-testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+test-support = { version = "0.1.0", path = "../test-support" }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }

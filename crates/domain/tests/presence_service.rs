@@ -1,59 +1,7 @@
-use app_core::Uuid;
-use auth::{AuthService, RegisterInput};
-use domain::{CreateChannelInput, CreateServerInput, CreateThreadInput, DomainService};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
+use domain::{CreateChannelInput, CreateServerInput, CreateThreadInput};
 
-async fn test_services() -> (
-    DomainService,
-    AuthService,
-    db::PgPool,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url).await.expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-
-    (
-        DomainService::new(pool.clone()),
-        AuthService::new(pool.clone(), std::sync::Arc::new(mailer::CaptureMailer::new())),
-        pool,
-        container,
-    )
-}
-
-fn register_input(email: &str, username: &str) -> RegisterInput {
-    RegisterInput {
-        email: email.to_string(),
-        username: username.to_string(),
-        password: "correct horse battery staple".to_string(),
-        display_name: username.to_string(),
-    }
-}
-
-async fn register(auth: &AuthService, email: &str, username: &str) -> Uuid {
-    auth.create_verified_account(register_input(email, username))
-        .await
-        .expect("registration succeeds")
-        .id
-}
+mod common;
+use common::*;
 
 fn create_server_input(name: &str) -> CreateServerInput {
     CreateServerInput {
@@ -70,7 +18,7 @@ async fn observers_include_every_fellow_member_across_multiple_servers_and_threa
     // must still return exactly the same observer set: this seeds two
     // servers, each with several threads, and checks nothing was lost or
     // duplicated by switching implementations.
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let carol = register(&auth, "carol@example.com", "carol").await;
@@ -144,7 +92,7 @@ async fn observers_include_every_fellow_member_across_multiple_servers_and_threa
 
 #[tokio::test]
 async fn a_dm_partner_is_an_observer_even_with_no_shared_server() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -160,7 +108,7 @@ async fn blocking_someone_removes_you_from_their_observer_set_but_not_the_revers
     // — directional. Alice blocking bob means bob's presence
     // updates no longer reach alice; it does not touch alice's own
     // visibility to bob.
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 

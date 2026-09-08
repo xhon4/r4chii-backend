@@ -4,66 +4,15 @@
 //! `domain_service.rs`/`visibility_service.rs`.
 
 use app_core::Uuid;
-use auth::{AuthService, RegisterInput};
 use chrono::{Duration, Utc};
 use domain::{
     permissions, ChannelSummary, CreateChannelInput, CreateRoleInput, CreateServerInput,
     DomainError, DomainService, EditMessageInput, SendMessageInput, ServerSummary, TimeoutInput,
     UpdateRoleInput,
 };
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
 
-async fn test_services() -> (
-    DomainService,
-    AuthService,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url)
-        .await
-        .expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-
-    (
-        DomainService::new(pool.clone()),
-        AuthService::new(pool, std::sync::Arc::new(mailer::CaptureMailer::new())),
-        container,
-    )
-}
-
-fn register_input(email: &str, username: &str) -> RegisterInput {
-    RegisterInput {
-        email: email.to_string(),
-        username: username.to_string(),
-        password: "correct horse battery staple".to_string(),
-        display_name: "Test User".to_string(),
-    }
-}
-
-async fn register(auth: &AuthService, email: &str, username: &str) -> Uuid {
-    auth.create_verified_account(register_input(email, username))
-        .await
-        .expect("registration succeeds")
-        .id
-}
+mod common;
+use common::*;
 
 async fn create_server(domain: &DomainService, owner: Uuid, name: &str) -> ServerSummary {
     domain

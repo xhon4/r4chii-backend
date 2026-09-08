@@ -33,5 +33,5 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 auth = { version = "0.1.0", path = "../auth", features = ["test-support"] }
 http-body-util = "0.1.5"
 mailer = { version = "0.1.0", path = "../mailer" }
-testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+test-support = { version = "0.1.0", path = "../test-support" }
 tower = { version = "0.5.3", features = ["util"] }

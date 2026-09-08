@@ -6,46 +6,10 @@
 
 use app_core::Uuid;
 use auth::{AuthService, RegisterInput};
-use domain::{CreateServerInput, DomainError, DomainService, ProfileViewerRelationship};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
+use domain::{CreateServerInput, DomainError, ProfileViewerRelationship};
 
-async fn test_services() -> (
-    DomainService,
-    AuthService,
-    db::PgPool,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url)
-        .await
-        .expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-
-    (
-        DomainService::new(pool.clone()),
-        AuthService::new(pool.clone(), std::sync::Arc::new(mailer::CaptureMailer::new())),
-        pool,
-        container,
-    )
-}
+mod common;
+use common::*;
 
 async fn register(auth: &AuthService, email: &str, username: &str) -> Uuid {
     auth.create_verified_account(RegisterInput {
@@ -61,7 +25,7 @@ async fn register(auth: &AuthService, email: &str, username: &str) -> Uuid {
 
 #[tokio::test]
 async fn self_view_reports_no_relationship_facts_and_no_blocks() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let ctx = domain
@@ -78,7 +42,7 @@ async fn self_view_reports_no_relationship_facts_and_no_blocks() {
 
 #[tokio::test]
 async fn an_accepted_friendship_yields_friend_relationship() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -92,7 +56,7 @@ async fn an_accepted_friendship_yields_friend_relationship() {
 
 #[tokio::test]
 async fn no_friendship_yields_none_relationship() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -103,7 +67,7 @@ async fn no_friendship_yields_none_relationship() {
 
 #[tokio::test]
 async fn a_pending_friend_request_does_not_yield_friend_relationship() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -118,7 +82,7 @@ async fn a_pending_friend_request_does_not_yield_friend_relationship() {
 
 #[tokio::test]
 async fn directional_blocks_are_reported_from_both_sides() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -135,7 +99,7 @@ async fn directional_blocks_are_reported_from_both_sides() {
 
 #[tokio::test]
 async fn a_deleted_account_is_reported_via_deleted_at() {
-    let (domain, auth, pool, _container) = test_services().await;
+    let (domain, auth, pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -153,7 +117,7 @@ async fn a_deleted_account_is_reported_via_deleted_at() {
 
 #[tokio::test]
 async fn shared_server_context_requires_both_caller_and_target_to_be_members() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let carol = register(&auth, "carol@example.com", "carol").await;
@@ -205,7 +169,7 @@ async fn shared_server_context_requires_both_caller_and_target_to_be_members() {
 
 #[tokio::test]
 async fn a_nonexistent_target_returns_account_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let ghost = app_core::new_id();
 
@@ -216,7 +180,7 @@ async fn a_nonexistent_target_returns_account_not_found() {
 
 #[tokio::test]
 async fn bulk_gathers_the_same_relationship_facts_as_the_single_lookup() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let carol = register(&auth, "carol@example.com", "carol").await;
@@ -251,7 +215,7 @@ async fn bulk_gathers_the_same_relationship_facts_as_the_single_lookup() {
 
 #[tokio::test]
 async fn bulk_skips_ids_that_name_no_account_and_never_carries_server_context() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -268,7 +232,7 @@ async fn bulk_skips_ids_that_name_no_account_and_never_carries_server_context() 
 
 #[tokio::test]
 async fn a_username_resolves_to_the_same_context_as_its_id() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 

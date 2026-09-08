@@ -1,65 +1,11 @@
-use app_core::Uuid;
-use auth::{AuthService, RegisterInput};
-use domain::{DomainError, DomainService};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
+use domain::DomainError;
 
-async fn test_services() -> (
-    DomainService,
-    AuthService,
-    db::PgPool,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url)
-        .await
-        .expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-
-    (
-        DomainService::new(pool.clone()),
-        AuthService::new(pool.clone(), std::sync::Arc::new(mailer::CaptureMailer::new())),
-        pool,
-        container,
-    )
-}
-
-fn register_input(email: &str, username: &str) -> RegisterInput {
-    RegisterInput {
-        email: email.to_string(),
-        username: username.to_string(),
-        password: "correct horse battery staple".to_string(),
-        display_name: username.to_string(),
-    }
-}
-
-async fn register(auth: &AuthService, email: &str, username: &str) -> Uuid {
-    auth.create_verified_account(register_input(email, username))
-        .await
-        .expect("registration succeeds")
-        .id
-}
+mod common;
+use common::*;
 
 #[tokio::test]
 async fn sending_a_first_friend_request_creates_a_pending_row() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -76,7 +22,7 @@ async fn sending_a_first_friend_request_creates_a_pending_row() {
 
 #[tokio::test]
 async fn a_reciprocal_request_accepts_the_existing_pending_request() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -96,7 +42,7 @@ async fn a_reciprocal_request_accepts_the_existing_pending_request() {
 
 #[tokio::test]
 async fn re_requesting_the_same_pending_direction_is_a_no_op() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -116,7 +62,7 @@ async fn re_requesting_the_same_pending_direction_is_a_no_op() {
 
 #[tokio::test]
 async fn requesting_an_already_accepted_friendship_is_a_no_op() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -134,7 +80,7 @@ async fn requesting_an_already_accepted_friendship_is_a_no_op() {
 
 #[tokio::test]
 async fn friend_request_with_yourself_is_rejected() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
 
     let result = domain.send_friend_request(alice, alice).await;
@@ -144,7 +90,7 @@ async fn friend_request_with_yourself_is_rejected() {
 
 #[tokio::test]
 async fn friend_request_to_a_nonexistent_account_returns_account_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let ghost = app_core::new_id();
 
@@ -155,7 +101,7 @@ async fn friend_request_to_a_nonexistent_account_returns_account_not_found() {
 
 #[tokio::test]
 async fn list_friendships_returns_both_pending_and_accepted_rows_from_the_callers_perspective() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
     let carol = register(&auth, "carol@example.com", "carol").await;
@@ -173,7 +119,7 @@ async fn list_friendships_returns_both_pending_and_accepted_rows_from_the_caller
 
 #[tokio::test]
 async fn removing_a_pending_request_lets_a_fresh_request_start_over() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -190,7 +136,7 @@ async fn removing_a_pending_request_lets_a_fresh_request_start_over() {
 
 #[tokio::test]
 async fn removing_an_accepted_friendship_unfriends_both_sides() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -205,7 +151,7 @@ async fn removing_an_accepted_friendship_unfriends_both_sides() {
 
 #[tokio::test]
 async fn removing_a_nonexistent_friendship_returns_friend_request_not_found() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -216,7 +162,7 @@ async fn removing_a_nonexistent_friendship_returns_friend_request_not_found() {
 
 #[tokio::test]
 async fn a_friend_request_between_a_blocked_pair_is_rejected_in_either_direction() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 
@@ -236,7 +182,7 @@ async fn a_friend_request_between_a_blocked_pair_is_rejected_in_either_direction
 // error instead of a clean accept.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_mutual_friend_requests_settle_on_exactly_one_accepted_row() {
-    let (domain, auth, _pool, _container) = test_services().await;
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
     let alice = register(&auth, "alice@example.com", "alice").await;
     let bob = register(&auth, "bob@example.com", "bob").await;
 

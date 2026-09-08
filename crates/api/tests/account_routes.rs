@@ -1,190 +1,18 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use axum::{
     body::Body,
-    extract::ConnectInfo,
-    http::{header, Method, Request, StatusCode},
+    http::{Method, StatusCode},
 };
-use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-async fn test_app() -> (
-    axum::Router,
-    mailer::CaptureMailer,
-    realtime::Hub,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url)
-        .await
-        .expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-
-    let mail = mailer::CaptureMailer::new();
-    let domain = domain::DomainService::new(pool.clone());
-    let state = api::AppState {
-        auth: auth::AuthService::new(pool, std::sync::Arc::new(mail.clone())),
-        domain: domain.clone(),
-        realtime: realtime::Hub::new(domain),
-        storage: None,
-    };
-    let hub = state.realtime.clone();
-
-    (api::router(state), mail, hub, container)
-}
+mod common;
+use common::*;
 
 // Same rationale as crates/api/tests/auth_routes.rs: the register/login
 // routes sit behind tower-governor and need a distinct fake peer per call to
 // avoid tripping the burst limit under `oneshot`.
-static NEXT_IP_OCTETS: AtomicU32 = AtomicU32::new(1);
-
-fn next_peer_addr() -> SocketAddr {
-    let n = NEXT_IP_OCTETS.fetch_add(1, Ordering::Relaxed);
-    let ip = Ipv4Addr::new(10, (n >> 16) as u8, (n >> 8) as u8, n as u8);
-    SocketAddr::new(IpAddr::V4(ip), 0)
-}
-
-fn request(method: Method, uri: &str) -> http::request::Builder {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .extension(ConnectInfo(next_peer_addr()))
-}
-
-fn json_request(method: Method, uri: &str, body: Value) -> Request<Body> {
-    request(method, uri)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body.to_string()))
-        .expect("request builds")
-}
-
-fn auth_json_request(method: Method, uri: &str, token: &str, body: Value) -> Request<Body> {
-    request(method, uri)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .body(Body::from(body.to_string()))
-        .expect("request builds")
-}
-
-fn auth_request(method: Method, uri: &str, token: &str) -> Request<Body> {
-    request(method, uri)
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .body(Body::empty())
-        .expect("request builds")
-}
-
-async fn body_json(response: axum::response::Response) -> Value {
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body collects")
-        .to_bytes();
-    serde_json::from_slice(&bytes).expect("body is valid JSON")
-}
-
-fn register_body(email: &str, username: &str) -> Value {
-    json!({
-        "email": email,
-        "username": username,
-        "password": "correct horse battery staple",
-        "display_name": "Test User",
-    })
-}
-
-fn login_body(email: &str) -> Value {
-    json!({
-        "email": email,
-        "password": "correct horse battery staple",
-    })
-}
-
-/// Registers, verifies, and logs in, returning (account_id, bearer_token).
-///
-/// Goes through the real HTTP flow rather than creating the account directly,
-/// so a break in registration surfaces here too instead of only in
-/// auth_routes.rs.
-async fn register_and_login(
-    app: &axum::Router,
-    mail: &mailer::CaptureMailer,
-    email: &str,
-    username: &str,
-) -> (String, String) {
-    let start = app
-        .clone()
-        .oneshot(json_request(
-            Method::POST,
-            "/api/v1/registrations",
-            register_body(email, username),
-        ))
-        .await
-        .expect("registration request succeeds");
-    assert_eq!(start.status(), StatusCode::ACCEPTED);
-
-    let code = mail
-        .last()
-        .expect("a verification mail was sent")
-        .body
-        .split_whitespace()
-        .find(|word| word.len() == 8 && word.chars().all(|c| c.is_ascii_digit()))
-        .expect("the mail carries an 8-digit code")
-        .to_string();
-
-    let verify_response = app
-        .clone()
-        .oneshot(json_request(
-            Method::POST,
-            "/api/v1/accounts",
-            json!({ "email": email, "code": code }),
-        ))
-        .await
-        .expect("verification request succeeds");
-    assert_eq!(verify_response.status(), StatusCode::CREATED);
-    let account_body = body_json(verify_response).await;
-    let account_id = account_body["id"]
-        .as_str()
-        .expect("account id present")
-        .to_string();
-
-    let login_response = app
-        .clone()
-        .oneshot(json_request(
-            Method::POST,
-            "/api/v1/sessions",
-            login_body(email),
-        ))
-        .await
-        .expect("login request succeeds");
-    let login_body = body_json(login_response).await;
-    let token = login_body["token"]
-        .as_str()
-        .expect("token present")
-        .to_string();
-
-    (account_id, token)
-}
 
 async fn create_server(app: &axum::Router, token: &str) -> Value {
     let response = app
@@ -216,7 +44,7 @@ async fn join_server(app: &axum::Router, token: &str, invite_code: &str) {
 
 #[tokio::test]
 async fn viewing_another_accounts_public_profile_never_includes_email() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
 
     let (alice_id, _alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
@@ -240,23 +68,9 @@ async fn viewing_another_accounts_public_profile_never_includes_email() {
     );
 }
 
-/// Direct connection to the test container's database, for setup with no HTTP
-/// path yet.
-async fn direct_pool(
-    container: &testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) -> db::PgPool {
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-    db::build_pool(&database_url).await.expect("pool connects")
-}
-
 #[tokio::test]
 async fn get_account_for_yourself_by_id_reports_self_relationship() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
 
@@ -276,7 +90,7 @@ async fn get_account_for_yourself_by_id_reports_self_relationship() {
 
 #[tokio::test]
 async fn get_account_with_no_relationship_reports_none() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (alice_id, _alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (_bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -296,7 +110,7 @@ async fn get_account_with_no_relationship_reports_none() {
 
 #[tokio::test]
 async fn get_account_after_a_reciprocal_friend_request_reports_friend() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -335,7 +149,7 @@ async fn get_account_after_a_reciprocal_friend_request_reports_friend() {
 
 #[tokio::test]
 async fn get_account_you_blocked_reports_blocked_relationship() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -366,7 +180,7 @@ async fn get_account_you_blocked_reports_blocked_relationship() {
 /// An inbound block with a live gateway connection registered for the blocker.
 #[tokio::test]
 async fn an_inbound_block_withholds_only_its_own_existence() {
-    let (app, mail, hub, _container) = test_app().await;
+    let (app, mail, hub, _container) = test_app_with_hub().await;
     let (alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -434,7 +248,7 @@ async fn an_inbound_block_withholds_only_its_own_existence() {
 
 #[tokio::test]
 async fn a_deleted_account_is_returned_as_a_tombstone_not_a_404() {
-    let (app, mail, hub, container) = test_app().await;
+    let (app, mail, hub, test_db) = test_app_with_hub().await;
     let (_alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -442,7 +256,7 @@ async fn a_deleted_account_is_returned_as_a_tombstone_not_a_404() {
     let bob_uuid: Uuid = bob_id.parse().expect("bob id is a uuid");
     let (_handle, _receiver) = hub.register(bob_uuid).await;
 
-    let pool = direct_pool(&container).await;
+    let pool = test_db.pool();
     sqlx::query("UPDATE account SET deleted_at = now() WHERE id = $1")
         .bind(bob_uuid)
         .execute(&pool)
@@ -476,7 +290,7 @@ async fn a_deleted_account_is_returned_as_a_tombstone_not_a_404() {
 
 #[tokio::test]
 async fn server_context_requires_shared_membership_and_rejects_invalid_server_ids() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -529,13 +343,13 @@ async fn server_context_requires_shared_membership_and_rejects_invalid_server_id
 /// A live connection and an `invisible` preference at once.
 #[tokio::test]
 async fn an_invisible_account_reads_as_offline_to_someone_else() {
-    let (app, mail, hub, container) = test_app().await;
+    let (app, mail, hub, test_db) = test_app_with_hub().await;
     let (_alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
     let bob_uuid: Uuid = bob_id.parse().expect("bob id is a uuid");
-    let pool = direct_pool(&container).await;
+    let pool = test_db.pool();
     sqlx::query("UPDATE account SET status = 'invisible' WHERE id = $1")
         .bind(bob_uuid)
         .execute(&pool)
@@ -564,11 +378,11 @@ async fn an_invisible_account_reads_as_offline_to_someone_else() {
 /// The self-view exemption to the `invisible` fold.
 #[tokio::test]
 async fn an_invisible_account_still_sees_its_own_status() {
-    let (app, mail, hub, container) = test_app().await;
+    let (app, mail, hub, test_db) = test_app_with_hub().await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
     let bob_uuid: Uuid = bob_id.parse().expect("bob id is a uuid");
-    let pool = direct_pool(&container).await;
+    let pool = test_db.pool();
     sqlx::query("UPDATE account SET status = 'invisible' WHERE id = $1")
         .bind(bob_uuid)
         .execute(&pool)
@@ -594,7 +408,7 @@ async fn an_invisible_account_still_sees_its_own_status() {
 
 #[tokio::test]
 async fn get_own_account_returns_the_self_shape_including_email() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
 
     let (_carol_id, carol_token) =
         register_and_login(&app, &mail, "carol@example.com", "carol").await;
@@ -612,7 +426,7 @@ async fn get_own_account_returns_the_self_shape_including_email() {
 
 #[tokio::test]
 async fn get_account_for_a_nonexistent_id_returns_404() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
 
     let (_dave_id, dave_token) = register_and_login(&app, &mail, "dave@example.com", "dave").await;
 
@@ -632,7 +446,7 @@ async fn get_account_for_a_nonexistent_id_returns_404() {
 
 #[tokio::test]
 async fn patch_accounts_me_updates_only_the_calling_account() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
 
     let (_erin_id, erin_token) = register_and_login(&app, &mail, "erin@example.com", "erin").await;
     let (frank_id, frank_token) = register_and_login(&app, &mail, "frank@example.com", "frank").await;
@@ -678,7 +492,7 @@ async fn patch_accounts_me_updates_only_the_calling_account() {
 
 #[tokio::test]
 async fn patch_accounts_me_updating_one_field_leaves_the_others_unchanged() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
 
     let (_grace_id, grace_token) =
         register_and_login(&app, &mail, "grace@example.com", "grace").await;
@@ -702,7 +516,7 @@ async fn patch_accounts_me_updating_one_field_leaves_the_others_unchanged() {
 
 #[tokio::test]
 async fn patch_accounts_me_to_a_taken_username_returns_409_and_leaves_the_caller_unmodified() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
 
     let (_heidi_id, _heidi_token) =
         register_and_login(&app, &mail, "heidi@example.com", "heidi").await;
@@ -734,7 +548,7 @@ async fn patch_accounts_me_to_a_taken_username_returns_409_and_leaves_the_caller
 
 #[tokio::test]
 async fn get_accounts_id_with_no_token_returns_401() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
 
     let (someone_id, _token) = register_and_login(&app, &mail, "jack@example.com", "jack").await;
 
@@ -753,7 +567,7 @@ async fn get_accounts_id_with_no_token_returns_401() {
 
 #[tokio::test]
 async fn patch_accounts_me_with_no_token_returns_401() {
-    let (app, _mail, _hub, _container) = test_app().await;
+    let (app, _mail, _hub, _container) = test_app_with_hub().await;
 
     let response = app
         .oneshot(json_request(
@@ -775,7 +589,7 @@ async fn patch_accounts_me_with_no_token_returns_401() {
 /// into the same `None`, so a bio could be set and never removed.
 #[tokio::test]
 async fn patch_accounts_me_tells_an_absent_field_apart_from_an_explicit_null() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
 
     let (_heidi_id, heidi_token) = register_and_login(&app, &mail, "heidi@example.com", "heidi").await;
 
@@ -841,7 +655,7 @@ async fn patch_accounts_me_tells_an_absent_field_apart_from_an_explicit_null() {
 
 #[tokio::test]
 async fn patch_accounts_me_rejects_an_invalid_accent_color_and_writes_nothing() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
 
     let (_ivan_id, ivan_token) = register_and_login(&app, &mail, "ivan@example.com", "ivan").await;
 
@@ -886,7 +700,7 @@ async fn patch_accounts_me_rejects_an_invalid_accent_color_and_writes_nothing() 
 /// data for an account that blocked the caller.
 #[tokio::test]
 async fn the_profile_and_member_list_agree_about_an_account_that_blocked_you() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -959,10 +773,9 @@ async fn the_profile_and_member_list_agree_about_an_account_that_blocked_you() {
     );
 }
 
-
 #[tokio::test]
 async fn bulk_hydrates_many_profiles_and_preserves_the_requested_order() {
-    let (app, mail, hub, _container) = test_app().await;
+    let (app, mail, hub, _container) = test_app_with_hub().await;
     let (alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -1017,7 +830,7 @@ async fn bulk_hydrates_many_profiles_and_preserves_the_requested_order() {
 
 #[tokio::test]
 async fn bulk_carries_the_custom_status_so_a_roster_needs_no_second_request() {
-    let (app, mail, hub, _container) = test_app().await;
+    let (app, mail, hub, _container) = test_app_with_hub().await;
     let (_alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -1056,7 +869,7 @@ async fn bulk_carries_the_custom_status_so_a_roster_needs_no_second_request() {
 
 #[tokio::test]
 async fn bulk_never_exposes_more_custom_status_than_the_full_profile() {
-    let (app, mail, hub, container) = test_app().await;
+    let (app, mail, hub, test_db) = test_app_with_hub().await;
     let (alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -1089,7 +902,7 @@ async fn bulk_never_exposes_more_custom_status_than_the_full_profile() {
         .await
         .expect("block request succeeds");
 
-    let pool = direct_pool(&container).await;
+    let pool = test_db.pool();
     sqlx::query("UPDATE account SET deleted_at = now() WHERE id = $1")
         .bind(carol_id.parse::<Uuid>().expect("uuid"))
         .execute(&pool)
@@ -1136,7 +949,7 @@ async fn bulk_never_exposes_more_custom_status_than_the_full_profile() {
 
 #[tokio::test]
 async fn bulk_rejects_more_than_a_hundred_ids() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
 
@@ -1159,7 +972,7 @@ async fn bulk_rejects_more_than_a_hundred_ids() {
 /// `invisible` preference still reads offline.
 #[tokio::test]
 async fn bulk_applies_the_same_visibility_decision_as_the_profile() {
-    let (app, mail, hub, container) = test_app().await;
+    let (app, mail, hub, test_db) = test_app_with_hub().await;
     let (_alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -1181,7 +994,7 @@ async fn bulk_applies_the_same_visibility_decision_as_the_profile() {
             .expect("avatar update succeeds");
     }
 
-    let pool = direct_pool(&container).await;
+    let pool = test_db.pool();
     sqlx::query("UPDATE account SET deleted_at = now() WHERE id = $1")
         .bind(bob_id.parse::<Uuid>().expect("uuid"))
         .execute(&pool)
@@ -1230,7 +1043,7 @@ async fn bulk_applies_the_same_visibility_decision_as_the_profile() {
 
 #[tokio::test]
 async fn a_profile_can_be_fetched_by_username_and_matches_the_id_route() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -1265,7 +1078,7 @@ async fn a_profile_can_be_fetched_by_username_and_matches_the_id_route() {
 /// URL happens to carry do not change who it resolves to.
 #[tokio::test]
 async fn the_username_lookup_ignores_case_and_missing_usernames_are_404() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, _bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
@@ -1299,7 +1112,7 @@ async fn the_username_lookup_ignores_case_and_missing_usernames_are_404() {
 /// after the original set.
 #[tokio::test]
 async fn patch_accounts_me_with_an_empty_body_leaves_the_new_profile_fields_alone() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_kate_id, kate_token) = register_and_login(&app, &mail, "kate@example.com", "kate").await;
 
     let seed_response = app
@@ -1349,7 +1162,7 @@ async fn patch_accounts_me_with_an_empty_body_leaves_the_new_profile_fields_alon
 
 #[tokio::test]
 async fn patch_accounts_me_persists_status_custom_status_links_and_visibility() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_liam_id, liam_token) = register_and_login(&app, &mail, "liam@example.com", "liam").await;
 
     let expires_at = (chrono::Utc::now() + chrono::TimeDelta::hours(2)).to_rfc3339();
@@ -1410,7 +1223,7 @@ async fn patch_accounts_me_persists_status_custom_status_links_and_visibility() 
 /// clears all three, not just the field that carries the name.
 #[tokio::test]
 async fn patch_accounts_me_with_a_null_custom_status_clears_text_emoji_and_expiry() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_mia_id, mia_token) = register_and_login(&app, &mail, "mia@example.com", "mia").await;
 
     let expires_at = (chrono::Utc::now() + chrono::TimeDelta::hours(3)).to_rfc3339();
@@ -1456,7 +1269,7 @@ async fn patch_accounts_me_with_a_null_custom_status_clears_text_emoji_and_expir
 
 #[tokio::test]
 async fn patch_accounts_me_rejects_a_status_outside_the_enum() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_noah_id, noah_token) = register_and_login(&app, &mail, "noah@example.com", "noah").await;
 
     for status in ["offline", "away", "Online", ""] {
@@ -1476,7 +1289,7 @@ async fn patch_accounts_me_rejects_a_status_outside_the_enum() {
 
 #[tokio::test]
 async fn patch_accounts_me_rejects_a_visibility_outside_the_enum() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_olivia_id, olivia_token) =
         register_and_login(&app, &mail, "olivia@example.com", "olivia").await;
 
@@ -1501,7 +1314,7 @@ async fn patch_accounts_me_rejects_a_visibility_outside_the_enum() {
 
 #[tokio::test]
 async fn patch_accounts_me_rejects_more_than_five_links() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_peter_id, peter_token) =
         register_and_login(&app, &mail, "peter@example.com", "peter").await;
 
@@ -1537,7 +1350,7 @@ async fn patch_accounts_me_rejects_more_than_five_links() {
 
 #[tokio::test]
 async fn patch_accounts_me_rejects_a_link_that_is_not_http_or_https() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_quinn_id, quinn_token) =
         register_and_login(&app, &mail, "quinn@example.com", "quinn").await;
 
@@ -1563,7 +1376,7 @@ async fn patch_accounts_me_rejects_a_link_that_is_not_http_or_https() {
 
 #[tokio::test]
 async fn patch_accounts_me_rejects_an_empty_or_over_long_link_label() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_rosa_id, rosa_token) = register_and_login(&app, &mail, "rosa@example.com", "rosa").await;
 
     for label in ["", "   ", &"a".repeat(33)] {
@@ -1583,7 +1396,7 @@ async fn patch_accounts_me_rejects_an_empty_or_over_long_link_label() {
 
 #[tokio::test]
 async fn patch_accounts_me_bounds_a_custom_status_expiry_to_the_next_day() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_sara_id, sara_token) = register_and_login(&app, &mail, "sara@example.com", "sara").await;
 
     let past = (chrono::Utc::now() - chrono::TimeDelta::hours(1)).to_rfc3339();
@@ -1622,7 +1435,7 @@ async fn patch_accounts_me_bounds_a_custom_status_expiry_to_the_next_day() {
 /// links are the only ones left.
 #[tokio::test]
 async fn patch_accounts_me_replaces_the_whole_link_set() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_tom_id, tom_token) = register_and_login(&app, &mail, "tom@example.com", "tom").await;
 
     let three = app
@@ -1689,7 +1502,7 @@ async fn patch_accounts_me_replaces_the_whole_link_set() {
 /// to the profile fields that arrived later.
 #[tokio::test]
 async fn patch_accounts_me_applies_nothing_when_a_new_field_is_invalid() {
-    let (app, mail, _hub, _container) = test_app().await;
+    let (app, mail, _hub, _container) = test_app_with_hub().await;
     let (_uma_id, uma_token) = register_and_login(&app, &mail, "uma@example.com", "uma").await;
 
     let seed = app
@@ -1760,7 +1573,7 @@ async fn patch_accounts_me_applies_nothing_when_a_new_field_is_invalid() {
 /// sees echoed back from their own endpoint.
 #[tokio::test]
 async fn a_status_set_through_the_patch_is_what_another_account_reads() {
-    let (app, mail, hub, _container) = test_app().await;
+    let (app, mail, hub, _container) = test_app_with_hub().await;
     let (_alice_id, alice_token) =
         register_and_login(&app, &mail, "alice@example.com", "alice").await;
     let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;

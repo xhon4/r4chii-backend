@@ -20,5 +20,5 @@ thiserror = "2.0.20"
 auth = { version = "0.1.0", path = "../auth", features = ["test-support"] }
 mailer = { version = "0.1.0", path = "../mailer" }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "bmp"] }
-testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+test-support = { version = "0.1.0", path = "../test-support" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }

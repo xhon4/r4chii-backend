@@ -4,10 +4,7 @@ use app_core::new_id;
 use chrono::{DateTime, Utc};
 use auth::{AuthError, AuthService, LoginInput, RegisterInput, VerifyRegistrationInput};
 use mailer::{CaptureMailer, MailError, MailFuture, Mailer, OutgoingMail};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
+use test_support::TestDb;
 
 /// Always fails delivery, to prove a failed send leaves no trace behind
 /// rather than a committed row nobody received the code for.
@@ -25,50 +22,23 @@ impl Mailer for FailingMailer {
 
 async fn pool_only() -> (
     db::PgPool,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    TestDb,
 ) {
-    let container = Postgres::default()
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-    let pool = db::build_pool(&database_url).await.expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-    (pool, container)
+    let test_db = test_support::test_db().await;
+    let pool = test_db.pool();
+    (pool, test_db)
 }
 
 struct Harness {
     service: AuthService,
     mail: CaptureMailer,
     pool: db::PgPool,
-    _container: testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    _db: TestDb,
 }
 
 async fn harness() -> Harness {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url).await.expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
+    let test_db = test_support::test_db().await;
+    let pool = test_db.pool();
 
     let mail = CaptureMailer::new();
     let service = AuthService::new(pool.clone(), Arc::new(mail.clone()));
@@ -77,7 +47,7 @@ async fn harness() -> Harness {
         service,
         mail,
         pool,
-        _container: container,
+        _db: test_db,
     }
 }
 
@@ -1226,7 +1196,7 @@ async fn concurrent_logins_never_exceed_the_session_cap() {
 
     // Fire more concurrent login attempts than the cap allows (but modest
     // enough not to starve the pool's own acquire timeout when the whole
-    // workspace test suite is running several testcontainers at once).
+    // workspace test suite is running several test binaries at once).
     // Without the `SELECT ... FOR UPDATE` row lock in `login`, this is a
     // TOCTOU race: several attempts can read the same pre-insert
     // active-session count and all pass the check, pushing the account

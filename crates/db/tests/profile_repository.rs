@@ -2,30 +2,16 @@ use app_core::{new_id, Uuid};
 use chrono::{DateTime, Utc};
 use db::profile::{get_profiles_bulk, get_server_context, replace_links, ProfileLinkInput};
 use sqlx::PgPool;
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
+use test_support::TestDb;
 
 async fn test_pool() -> (
     PgPool,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    TestDb,
 ) {
-    let container = Postgres::default()
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-    let pool = db::build_pool(&database_url).await.expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
+    let test_db = test_support::test_db().await;
+    let pool = test_db.pool();
 
-    (pool, container)
+    (pool, test_db)
 }
 
 async fn insert_account(pool: &PgPool, username: &str) -> Uuid {

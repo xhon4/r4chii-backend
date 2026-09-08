@@ -6,21 +6,15 @@
 //! itself and the signed redirect are only exercised against a live
 //! S3-compatible endpoint, which this suite does not stand up.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use axum::{
     body::Body,
     extract::ConnectInfo,
     http::{header, Method, Request, StatusCode},
 };
-use http_body_util::BodyExt;
-use serde_json::{json, Value};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
 use tower::ServiceExt;
+
+mod common;
+use common::*;
 
 /// A one pixel PNG. Inline rather than encoded here so these tests need no
 /// image library of their own.
@@ -31,47 +25,6 @@ const TINY_PNG: &[u8] = &[
 ];
 
 const BOUNDARY: &str = "boundarytestboundary";
-
-async fn test_app() -> (
-    axum::Router,
-    mailer::CaptureMailer,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-) {
-    let container = Postgres::default()
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url).await.expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
-
-    let mail = mailer::CaptureMailer::new();
-    let domain = domain::DomainService::new(pool.clone());
-    let state = api::AppState {
-        auth: auth::AuthService::new(pool, std::sync::Arc::new(mail.clone())),
-        domain: domain.clone(),
-        realtime: realtime::Hub::new(domain),
-        storage: None,
-    };
-
-    (api::router(state), mail, container)
-}
-
-static NEXT_IP_OCTETS: AtomicU32 = AtomicU32::new(1);
-
-fn next_peer_addr() -> SocketAddr {
-    let n = NEXT_IP_OCTETS.fetch_add(1, Ordering::Relaxed);
-    let ip = Ipv4Addr::new(10, (n >> 16) as u8, (n >> 8) as u8, n as u8);
-    SocketAddr::new(IpAddr::V4(ip), 0)
-}
 
 fn multipart_body(bytes: &[u8]) -> Body {
     let mut body = Vec::new();
@@ -98,77 +51,6 @@ fn upload_request(uri: &str, token: Option<&str>, bytes: &[u8]) -> Request<Body>
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
     builder.body(multipart_body(bytes)).expect("request builds")
-}
-
-async fn body_json(response: axum::response::Response) -> Value {
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body collects")
-        .to_bytes();
-    serde_json::from_slice(&bytes).expect("body is valid JSON")
-}
-
-async fn register_and_login(
-    app: &axum::Router,
-    mail: &mailer::CaptureMailer,
-    email: &str,
-    username: &str,
-) -> String {
-    let json_request = |uri: &str, body: Value| {
-        Request::builder()
-            .method(Method::POST)
-            .uri(uri)
-            .extension(ConnectInfo(next_peer_addr()))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_string()))
-            .expect("request builds")
-    };
-
-    app.clone()
-        .oneshot(json_request(
-            "/api/v1/registrations",
-            json!({
-                "email": email,
-                "username": username,
-                "password": "correct horse battery staple",
-                "display_name": "Test User",
-            }),
-        ))
-        .await
-        .expect("registration request succeeds");
-
-    let code = mail
-        .last()
-        .expect("a verification mail was sent")
-        .body
-        .split_whitespace()
-        .find(|word| word.len() == 8 && word.chars().all(|c| c.is_ascii_digit()))
-        .expect("the mail carries an 8-digit code")
-        .to_string();
-
-    app.clone()
-        .oneshot(json_request(
-            "/api/v1/accounts",
-            json!({ "email": email, "code": code }),
-        ))
-        .await
-        .expect("verification request succeeds");
-
-    let login = app
-        .clone()
-        .oneshot(json_request(
-            "/api/v1/sessions",
-            json!({ "email": email, "password": "correct horse battery staple" }),
-        ))
-        .await
-        .expect("login request succeeds");
-
-    body_json(login).await["token"]
-        .as_str()
-        .expect("token present")
-        .to_string()
 }
 
 #[tokio::test]
@@ -213,7 +95,7 @@ async fn serving_media_without_a_session_is_unauthenticated() {
 #[tokio::test]
 async fn an_upload_that_is_not_an_image_is_rejected() {
     let (app, mail, _container) = test_app().await;
-    let token = register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (_account_id, token) = register_and_login(&app, &mail, "alice@example.com", "alice").await;
 
     let response = app
         .oneshot(upload_request(
@@ -234,7 +116,7 @@ async fn an_upload_that_is_not_an_image_is_rejected() {
 #[tokio::test]
 async fn a_valid_upload_reaches_storage_and_reports_it_missing() {
     let (app, mail, _container) = test_app().await;
-    let token = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+    let (_account_id, token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
 
     let response = app
         .oneshot(upload_request(
@@ -255,7 +137,7 @@ async fn a_valid_upload_reaches_storage_and_reports_it_missing() {
 #[tokio::test]
 async fn a_media_key_cannot_escape_its_prefix() {
     let (app, mail, _container) = test_app().await;
-    let token = register_and_login(&app, &mail, "carol@example.com", "carol").await;
+    let (_account_id, token) = register_and_login(&app, &mail, "carol@example.com", "carol").await;
 
     let response = app
         .oneshot(

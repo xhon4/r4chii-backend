@@ -1,7 +1,7 @@
 //! Integration coverage for `Hub::publish_*`'s authorization-scoped fan-out
 //! — the parts of `Hub` that need a real `domain::DomainService` (and so a
 //! real Postgres) to exercise, unlike the registry-only unit tests in
-//! `crates/realtime/src/hub.rs`. Same testcontainers pattern as
+//! `crates/realtime/src/hub.rs`. Same shared-Postgres pattern as
 //! `crates/domain/tests/domain_service.rs`.
 
 use std::time::Duration;
@@ -9,44 +9,23 @@ use std::time::Duration;
 use auth::{AuthService, RegisterInput};
 use domain::{CreateChannelInput, CreateServerInput, DomainService, SendMessageInput};
 use realtime::{Hub, MemberLeaveReason};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ImageExt},
-};
+use test_support::TestDb;
 use tokio::time::timeout;
 
 async fn test_services() -> (
     Hub,
     DomainService,
     AuthService,
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    TestDb,
 ) {
-    let container = Postgres::default()
-        // postgres:16, the tag production runs (docker-compose.yml).
-        // The crate default is 11-alpine: five majors and a different
-        // libc away from the database this schema is deployed on.
-        .with_tag("16")
-        .start()
-        .await
-        .expect("postgres container starts");
-
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-
-    let pool = db::build_pool(&database_url)
-        .await
-        .expect("pool connects");
-    db::run_migrations(&pool).await.expect("migrations run");
+    let test_db = test_support::test_db().await;
+    let pool = test_db.pool();
 
     let domain = DomainService::new(pool.clone());
     let auth = AuthService::new(pool, std::sync::Arc::new(mailer::CaptureMailer::new()));
     let hub = Hub::new(domain.clone());
 
-    (hub, domain, auth, container)
+    (hub, domain, auth, test_db)
 }
 
 fn register_input(email: &str, username: &str) -> RegisterInput {
