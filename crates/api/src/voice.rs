@@ -43,7 +43,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::Mutex;
 
 use crate::error::ApiError;
 use crate::extract::AuthenticatedUser;
@@ -242,25 +242,8 @@ struct CachedIce {
     expires_at: Instant,
 }
 
-#[derive(Default)]
-struct IceCacheState {
-    cached: Option<CachedIce>,
-    /// In-flight single-flight channel receiver for deduplicating concurrent requests.
-    in_flight: Option<watch::Receiver<Option<Option<Vec<IceServer>>>>>,
-}
-
-/// `Arc` rather than a bare `&'static Mutex`, so the exact same cache state a
-/// test constructs can be handed to `ice_servers_via_single_flight` and
-/// driven from multiple spawned tasks (which need owned, `'static` data),
-/// while the process-wide caller (`cloudflare_ice_servers`) just clones the
-/// one behind `ICE_CACHE` — an `Arc` clone, not a fresh cache.
-static ICE_CACHE: OnceLock<Arc<Mutex<IceCacheState>>> = OnceLock::new();
-
-fn ice_cache() -> Arc<Mutex<IceCacheState>> {
-    ICE_CACHE
-        .get_or_init(|| Arc::new(Mutex::new(IceCacheState::default())))
-        .clone()
-}
+/// `Arc` so a test can hand an owned, `'static` cache to spawned tasks.
+static ICE_CACHE: OnceLock<Arc<Mutex<Option<CachedIce>>>> = OnceLock::new();
 
 /// Cloudflare's two credential endpoints answer with two different shapes, and
 /// this accepts both.
@@ -313,118 +296,45 @@ fn configured(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|value| !value.is_empty())
 }
 
-/// Whether a just-finished mint attempt should overwrite the cache.
-///
-/// Pulled out of the single-flight loop below into its own pure function —
-/// no lock, no I/O, just the three-way decision on what is already known —
-/// so both the production path and its tests call the SAME decision instead
-/// of the tests hand-copying these match arms and silently drifting from
-/// whatever this function is changed to later.
-fn should_write_cache(
-    current: &Option<CachedIce>,
-    minted: &Option<Vec<IceServer>>,
-    now: Instant,
-) -> bool {
-    match (current, minted) {
-        // Success always updates the cache with fresh credentials.
-        (_, Some(_)) => true,
-        // Failure only updates if there is no currently valid cache.
-        (None, None) => true,
-        (Some(current), None) => current.expires_at <= now,
-    }
-}
-
-/// The single-flight leader/follower loop, generic over the cache instance
-/// and the mint function so a test can drive this EXACT loop against an
-/// injected `IceCacheState` and an injected async mint — instead of the
-/// loop being reimplemented inside the test body, which is what let a
-/// previous version of this file's tests pass while asserting nothing about
-/// whether this loop still behaved this way.
-///
-/// Deduplicates concurrent requests (single-flight) to eliminate stampedes
-/// when the cache expires. Safely resolves races: a slow or failed request
-/// can never overwrite a valid cache written by a newer or faster attempt
-/// (`should_write_cache` above).
-async fn ice_servers_via_single_flight<F, Fut>(
-    cache: Arc<Mutex<IceCacheState>>,
-    mint: F,
-) -> Option<Vec<IceServer>>
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = Option<Vec<IceServer>>>,
-{
-    loop {
-        let mut in_flight_rx = {
-            let mut state = cache.lock().await;
-
-            // 1. Return valid cache immediately if present and not expired
-            if let Some(ref cached) = state.cached {
-                if cached.expires_at > Instant::now() {
-                    return cached.ice_servers.clone();
-                }
-            }
-
-            // 2. Check if a live mint is already in flight
-            if let Some(ref rx) = state.in_flight {
-                if rx.has_changed().is_err() {
-                    state.in_flight = None;
-                }
-            }
-
-            if let Some(ref rx) = state.in_flight {
-                rx.clone()
-            } else {
-                // 3. No live in-flight request: this task becomes the single-flight leader
-                let (tx, rx) = watch::channel(None);
-                state.in_flight = Some(rx);
-
-                // Release the mutex during the outbound network call
-                drop(state);
-
-                let minted = mint().await;
-
-                // Re-acquire lock to commit the result and notify waiters
-                let mut state = cache.lock().await;
-                state.in_flight = None;
-
-                let now = Instant::now();
-                if should_write_cache(&state.cached, &minted, now) {
-                    let lifetime = if minted.is_some() {
-                        TURN_CACHE_LIFETIME
-                    } else {
-                        TURN_FAILURE_COOLDOWN
-                    };
-                    state.cached = Some(CachedIce {
-                        ice_servers: minted.clone(),
-                        expires_at: now + lifetime,
-                    });
-                }
-
-                // Broadcast to all concurrent waiters
-                let _ = tx.send(Some(minted.clone()));
-                return minted;
-            }
-        };
-
-        // 4. Follower: wait for the in-flight leader to finish
-        if in_flight_rx.wait_for(|val| val.is_some()).await.is_ok() {
-            let borrowed = in_flight_rx.borrow();
-            if let Some(ref result) = *borrowed {
-                return result.clone();
-            }
-        }
-        // If wait_for errored (leader was dropped/cancelled), loop retries to check cache or become leader
-    }
-}
-
 /// The ICE servers to hand this caller, minting a set only when the cached
 /// outcome — success or failure — has run out.
 ///
-/// Thin wrapper binding the process-wide cache and the real Cloudflare mint
-/// to `ice_servers_via_single_flight` above — see that function for the
-/// actual caching/dedup behaviour.
+/// The lock is held ACROSS the mint on purpose: that is what deduplicates a
+/// stampede, since everyone arriving during a mint waits on it and then reads
+/// what the leader wrote. `TURN_REQUEST_TIMEOUT` bounds how long it is held.
+async fn ice_servers_cached<F, Fut>(
+    cache: Arc<Mutex<Option<CachedIce>>>,
+    mint: F,
+) -> Option<Vec<IceServer>>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Option<Vec<IceServer>>>,
+{
+    let mut cache = cache.lock().await;
+
+    if let Some(cached) = cache.as_ref() {
+        if cached.expires_at > Instant::now() {
+            return cached.ice_servers.clone();
+        }
+    }
+
+    let minted = mint().await;
+    let lifetime = if minted.is_some() {
+        TURN_CACHE_LIFETIME
+    } else {
+        TURN_FAILURE_COOLDOWN
+    };
+    *cache = Some(CachedIce {
+        ice_servers: minted.clone(),
+        expires_at: Instant::now() + lifetime,
+    });
+
+    minted
+}
+
 async fn cloudflare_ice_servers() -> Option<Vec<IceServer>> {
-    ice_servers_via_single_flight(ice_cache(), mint_cloudflare_ice_servers).await
+    let cache = ICE_CACHE.get_or_init(|| Arc::new(Mutex::new(None))).clone();
+    ice_servers_cached(cache, mint_cloudflare_ice_servers).await
 }
 
 /// Asks Cloudflare for a fresh, short-lived set of ICE servers.
@@ -908,71 +818,16 @@ mod tests {
         assert!(described.contains("502 Bad Gateway"));
     }
 
-    /// Exercises the REAL decision function, not a copy of its match arms —
-    /// the whole point being that a future edit to `should_write_cache`
-    /// cannot silently drift out of sync with what this test asserts.
-    #[test]
-    fn cache_state_failure_does_not_overwrite_valid_cache() {
-        let valid_servers = vec![IceServer {
-            urls: vec!["turn:turn.example.com:3478".to_string()],
-            username: Some("user".to_string()),
-            credential: Some("pass".to_string()),
-        }];
-
-        // Valid cache expiring in 1 hour.
-        let cached = Some(CachedIce {
-            ice_servers: Some(valid_servers),
-            expires_at: Instant::now() + Duration::from_secs(3600),
-        });
-
-        // A failed mint (minted = None) must NOT overwrite it.
-        let minted: Option<Vec<IceServer>> = None;
-        assert!(!should_write_cache(&cached, &minted, Instant::now()));
-    }
-
-    #[test]
-    fn cache_state_expired_cache_allows_failure_cooldown() {
-        // Already-expired cache.
-        let cached = Some(CachedIce {
-            ice_servers: Some(vec![]),
-            expires_at: Instant::now() - Duration::from_secs(10),
-        });
-
-        // A failed mint is free to write the failure-cooldown entry once the
-        // cache it would replace has nothing valid left in it.
-        let minted: Option<Vec<IceServer>> = None;
-        assert!(should_write_cache(&cached, &minted, Instant::now()));
-    }
-
-    #[test]
-    fn cache_state_success_always_overwrites_even_a_valid_cache() {
-        // A still-valid cache does not block a SUCCESSFUL mint from
-        // refreshing it — only a failed one is held back by
-        // `cache_state_failure_does_not_overwrite_valid_cache` above.
-        let cached = Some(CachedIce {
-            ice_servers: Some(vec![]),
-            expires_at: Instant::now() + Duration::from_secs(3600),
-        });
-
-        let minted = Some(vec![IceServer {
-            urls: vec!["turn:fresh.example.com:3478".to_string()],
-            username: Some("user".to_string()),
-            credential: Some("pass".to_string()),
-        }]);
-        assert!(should_write_cache(&cached, &minted, Instant::now()));
-    }
-
-    /// Drives the REAL single-flight loop (`ice_servers_via_single_flight`),
-    /// not a reimplementation of it, against an injected cache and an
-    /// injected mint function that counts its own invocations. A previous
-    /// version of this test hand-copied the leader/follower loop into the
-    /// test body, which meant it could stay green after a change that broke
-    /// the real loop's deduplication.
+    /// Drives the REAL cache (`ice_servers_cached`), not a reimplementation
+    /// of it, against an injected cache and an injected mint function that
+    /// counts its own invocations. A previous version of this test hand-copied
+    /// the deduplication logic into the test body, which meant it could stay
+    /// green after a change that broke the real one.
     #[tokio::test]
-    async fn single_flight_deduplicates_concurrent_calls() {
+    async fn concurrent_callers_share_one_mint() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let cache = Arc::new(Mutex::new(IceCacheState::default()));
+        let cache = Arc::new(Mutex::new(None));
         let counter = Arc::new(AtomicUsize::new(0));
 
         let mut handles = Vec::new();
@@ -980,7 +835,7 @@ mod tests {
             let cache = Arc::clone(&cache);
             let counter = Arc::clone(&counter);
             handles.push(tokio::spawn(async move {
-                ice_servers_via_single_flight(cache, move || {
+                ice_servers_cached(cache, move || {
                     let counter = Arc::clone(&counter);
                     async move {
                         // Simulate a slow network fetch, so every task that
@@ -1005,7 +860,36 @@ mod tests {
             assert_eq!(res.unwrap()[0].urls[0], "turn:mock.cloudflare.com");
         }
 
-        // Exactly 1 network fetch should have executed despite 20 concurrent tasks!
+        // Exactly 1 network fetch should have executed despite 20 concurrent tasks.
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    /// A FAILED mint is cached too, and that is the whole point of
+    /// `TURN_FAILURE_COOLDOWN`: while Cloudflare is unreachable, every joiner
+    /// arriving in the cooldown window would otherwise pay its own
+    /// `TURN_REQUEST_TIMEOUT` to rediscover the same outage.
+    #[tokio::test]
+    async fn a_failed_mint_is_cached_and_not_retried_immediately() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = Arc::new(Mutex::new(None));
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..5 {
+            let counter = Arc::clone(&counter);
+            let result = ice_servers_cached(Arc::clone(&cache), move || async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                None
+            })
+            .await;
+            assert!(result.is_none());
+        }
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        // And the entry it wrote is the short cooldown, not the hour a
+        // successful mint gets — a relay that comes back must not stay unused.
+        let expires_at = cache.lock().await.as_ref().unwrap().expires_at;
+        assert!(expires_at <= Instant::now() + TURN_FAILURE_COOLDOWN);
     }
 }
