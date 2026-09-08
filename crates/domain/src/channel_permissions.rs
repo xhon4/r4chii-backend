@@ -19,26 +19,11 @@ pub const SEND_MESSAGE: i64 = 1 << 1;
 /// Reserved, NOT enforced — same reasoning as `SEND_MESSAGE`.
 pub const JOIN_VOICE: i64 = 1 << 2;
 
-pub fn has(permissions: i64, bit: i64) -> bool {
-    permissions & bit == bit
-}
+pub use crate::permissions::has;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn has_detects_a_set_bit_among_others() {
-        let permissions = VIEW_CHANNEL | JOIN_VOICE;
-        assert!(has(permissions, VIEW_CHANNEL));
-        assert!(has(permissions, JOIN_VOICE));
-        assert!(!has(permissions, SEND_MESSAGE));
-    }
-
-    #[test]
-    fn has_is_false_for_zero_permissions() {
-        assert!(!has(0, VIEW_CHANNEL));
-    }
 
     #[test]
     fn every_bit_is_distinct() {

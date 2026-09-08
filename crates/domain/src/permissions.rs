@@ -59,17 +59,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn has_detects_a_set_bit_among_others() {
+    fn has_requires_every_requested_bit() {
         let permissions = MANAGE_ROLES | BAN;
-        assert!(has(permissions, MANAGE_ROLES));
-        assert!(has(permissions, BAN));
-        assert!(!has(permissions, KICK));
+        assert!(has(permissions, MANAGE_ROLES | BAN));
+        assert!(!has(permissions, MANAGE_ROLES | KICK));
         assert!(!has(permissions, ADMIN));
     }
 
     #[test]
-    fn has_is_false_for_zero_permissions() {
+    fn has_preserves_zero_mask_behavior() {
         assert!(!has(0, ADMIN));
+        assert!(has(0, 0));
+        assert!(has(MANAGE_ROLES, 0));
     }
 
     #[test]
