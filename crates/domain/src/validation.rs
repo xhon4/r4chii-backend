@@ -32,20 +32,30 @@ const MAX_MESSAGE_CONTENT_LEN: usize = 4000;
 /// motivation as the message content cap above.
 const MAX_GROUP_DM_PARTICIPANTS: usize = 50;
 
-pub(crate) fn validate_server_name(name: &str) -> Result<(), DomainError> {
-    if name.trim().is_empty() {
-        return Err(DomainError::Validation(
-            "server name must not be empty".to_string(),
-        ));
+/// The shape every free-text field here shares: present after trimming, and
+/// bounded by CHARACTERS rather than bytes, so an accented value is not
+/// silently shorter than an ASCII one.
+///
+/// One function rather than one copy per field. These are business rules; six
+/// copies of a rule drift the day one of them changes.
+fn bounded_text(field: &str, value: &str, max: usize) -> Result<(), DomainError> {
+    if value.trim().is_empty() {
+        return Err(DomainError::Validation(format!(
+            "{field} must not be empty"
+        )));
     }
 
-    if name.chars().count() > MAX_SERVER_NAME_LEN {
+    if value.chars().count() > max {
         return Err(DomainError::Validation(format!(
-            "server name must be at most {MAX_SERVER_NAME_LEN} characters"
+            "{field} must be at most {max} characters"
         )));
     }
 
     Ok(())
+}
+
+pub(crate) fn validate_server_name(name: &str) -> Result<(), DomainError> {
+    bounded_text("server name", name, MAX_SERVER_NAME_LEN)
 }
 
 /// Matches the `server.visibility` CHECK constraint
@@ -62,19 +72,7 @@ pub(crate) fn validate_visibility(visibility: &str) -> Result<(), DomainError> {
 }
 
 pub(crate) fn validate_channel_name(name: &str) -> Result<(), DomainError> {
-    if name.trim().is_empty() {
-        return Err(DomainError::Validation(
-            "channel name must not be empty".to_string(),
-        ));
-    }
-
-    if name.chars().count() > MAX_CHANNEL_NAME_LEN {
-        return Err(DomainError::Validation(format!(
-            "channel name must be at most {MAX_CHANNEL_NAME_LEN} characters"
-        )));
-    }
-
-    Ok(())
+    bounded_text("channel name", name, MAX_CHANNEL_NAME_LEN)
 }
 
 /// Narrows a caller-supplied channel kind to the two a *server* channel may
@@ -103,38 +101,14 @@ pub(crate) fn validate_channel_kind(kind: Option<&str>) -> Result<&str, DomainEr
 const MAX_SEARCH_QUERY_LEN: usize = 500;
 
 pub(crate) fn validate_search_query(query: &str) -> Result<(), DomainError> {
-    if query.trim().is_empty() {
-        return Err(DomainError::Validation(
-            "search query must not be empty".to_string(),
-        ));
-    }
-
-    if query.chars().count() > MAX_SEARCH_QUERY_LEN {
-        return Err(DomainError::Validation(format!(
-            "search query must be at most {MAX_SEARCH_QUERY_LEN} characters"
-        )));
-    }
-
-    Ok(())
+    bounded_text("search query", query, MAX_SEARCH_QUERY_LEN)
 }
 
 /// Validates a thread's `title`. Same shape as `validate_channel_name`, just
 /// a longer ceiling — a thread title reads more like a topic/subject line
 /// than a channel name.
 pub(crate) fn validate_thread_title(title: &str) -> Result<(), DomainError> {
-    if title.trim().is_empty() {
-        return Err(DomainError::Validation(
-            "thread title must not be empty".to_string(),
-        ));
-    }
-
-    if title.chars().count() > MAX_THREAD_TITLE_LEN {
-        return Err(DomainError::Validation(format!(
-            "thread title must be at most {MAX_THREAD_TITLE_LEN} characters"
-        )));
-    }
-
-    Ok(())
+    bounded_text("thread title", title, MAX_THREAD_TITLE_LEN)
 }
 
 /// URL-safe slug for a thread's canonical URL: lowercased,
@@ -173,19 +147,7 @@ pub(crate) fn slugify(title: &str) -> String {
 }
 
 pub(crate) fn validate_message_content(content: &str) -> Result<(), DomainError> {
-    if content.trim().is_empty() {
-        return Err(DomainError::Validation(
-            "message content must not be empty".to_string(),
-        ));
-    }
-
-    if content.chars().count() > MAX_MESSAGE_CONTENT_LEN {
-        return Err(DomainError::Validation(format!(
-            "message content must be at most {MAX_MESSAGE_CONTENT_LEN} characters"
-        )));
-    }
-
-    Ok(())
+    bounded_text("message content", content, MAX_MESSAGE_CONTENT_LEN)
 }
 
 /// Scans `content` for `@everyone`, `@here`, and `@<role-slug>`
@@ -219,19 +181,7 @@ pub(crate) fn extract_mention_tokens(content: &str) -> Vec<String> {
 }
 
 pub(crate) fn validate_role_name(name: &str) -> Result<(), DomainError> {
-    if name.trim().is_empty() {
-        return Err(DomainError::Validation(
-            "role name must not be empty".to_string(),
-        ));
-    }
-
-    if name.chars().count() > MAX_ROLE_NAME_LEN {
-        return Err(DomainError::Validation(format!(
-            "role name must be at most {MAX_ROLE_NAME_LEN} characters"
-        )));
-    }
-
-    Ok(())
+    bounded_text("role name", name, MAX_ROLE_NAME_LEN)
 }
 
 /// `#` + 3/4/6/8 hex digits — the shorthand and alpha-channel forms a CSS

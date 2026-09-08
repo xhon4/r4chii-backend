@@ -87,20 +87,25 @@ pub(crate) fn validate_password(password: &str) -> Result<(), AuthError> {
 /// predictable regardless of what a caller sends.
 const MAX_DISPLAY_NAME_LEN: usize = 32;
 
-pub(crate) fn validate_display_name(display_name: &str) -> Result<(), AuthError> {
-    if display_name.trim().is_empty() {
-        return Err(AuthError::Validation(
-            "display name must not be empty".to_string(),
-        ));
+/// The shape the free-text fields here share: present after trimming, and
+/// bounded by CHARACTERS rather than bytes, so an accented value is not
+/// silently shorter than an ASCII one.
+fn bounded_text(field: &str, value: &str, max: usize) -> Result<(), AuthError> {
+    if value.trim().is_empty() {
+        return Err(AuthError::Validation(format!("{field} must not be empty")));
     }
 
-    if display_name.chars().count() > MAX_DISPLAY_NAME_LEN {
+    if value.chars().count() > max {
         return Err(AuthError::Validation(format!(
-            "display name must be at most {MAX_DISPLAY_NAME_LEN} characters"
+            "{field} must be at most {max} characters"
         )));
     }
 
     Ok(())
+}
+
+pub(crate) fn validate_display_name(display_name: &str) -> Result<(), AuthError> {
+    bounded_text("display name", display_name, MAX_DISPLAY_NAME_LEN)
 }
 
 /// M0 stores `avatar_url` as a plain string with no real upload flow yet —
@@ -109,29 +114,30 @@ pub(crate) fn validate_display_name(display_name: &str) -> Result<(), AuthError>
 /// (no change requested) skips validation entirely.
 const MAX_AVATAR_URL_LEN: usize = 2048;
 
-pub(crate) fn validate_avatar_url(avatar_url: &str) -> Result<(), AuthError> {
-    if avatar_url.trim().is_empty() {
-        return Err(AuthError::Validation(
-            "avatar url must not be empty".to_string(),
-        ));
-    }
+/// The url rules every url field here shares: a length bound, a parseable
+/// url, and an http(s) scheme.
+///
+/// The field name is a parameter so each caller names itself in its own
+/// error. Rewriting another field's message after the fact — which is how
+/// the banner and profile-link errors used to get their names — depends on
+/// the wording of a message it does not own.
+fn validate_http_url(field: &str, value: &str) -> Result<(), AuthError> {
+    bounded_text(field, value, MAX_AVATAR_URL_LEN)?;
 
-    if avatar_url.chars().count() > MAX_AVATAR_URL_LEN {
+    let parsed = url::Url::parse(value)
+        .map_err(|_| AuthError::Validation(format!("{field} must be a valid url")))?;
+
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(AuthError::Validation(format!(
-            "avatar url must be at most {MAX_AVATAR_URL_LEN} characters"
+            "{field} must use http or https"
         )));
     }
 
-    let parsed = url::Url::parse(avatar_url)
-        .map_err(|_| AuthError::Validation("avatar url must be a valid url".to_string()))?;
-
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err(AuthError::Validation(
-            "avatar url must use http or https".to_string(),
-        ));
-    }
-
     Ok(())
+}
+
+pub(crate) fn validate_avatar_url(avatar_url: &str) -> Result<(), AuthError> {
+    validate_http_url("avatar url", avatar_url)
 }
 
 /// Matches migration 0004's `account_bio_length`. Characters, not bytes, so
@@ -154,14 +160,7 @@ pub(crate) fn validate_bio(bio: &str) -> Result<(), AuthError> {
 }
 
 pub(crate) fn validate_banner_url(banner_url: &str) -> Result<(), AuthError> {
-    // Same shape and rules as an avatar url; only the field name in the
-    // error needs to change to actually name what was rejected.
-    validate_avatar_url(banner_url).map_err(|err| match err {
-        AuthError::Validation(message) => {
-            AuthError::Validation(message.replace("avatar", "banner"))
-        }
-        other => other,
-    })
+    validate_http_url("banner url", banner_url)
 }
 
 /// Exactly `#RRGGBB`. Three-digit shorthand and named colours are rejected on
@@ -372,12 +371,7 @@ pub(crate) fn sanitize_profile_link_url(url: &str) -> Result<String, AuthError> 
         )));
     }
 
-    validate_avatar_url(trimmed).map_err(|err| match err {
-        AuthError::Validation(message) => {
-            AuthError::Validation(message.replace("avatar url", "profile link url"))
-        }
-        other => other,
-    })?;
+    validate_http_url("profile link url", trimmed)?;
 
     Ok(trimmed.to_string())
 }
