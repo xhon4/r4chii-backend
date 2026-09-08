@@ -7,6 +7,20 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Collection envelope for an endpoint that does not paginate.
+#[derive(Debug, Serialize)]
+pub struct ListResponse<T> {
+    pub items: Vec<T>,
+}
+
+/// Collection envelope for an endpoint that paginates. `next_cursor` is
+/// `null` on the last page.
+#[derive(Debug, Serialize)]
+pub struct PagedResponse<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     pub email: String,
@@ -189,11 +203,6 @@ pub struct ProfileSummaryResponse {
     /// a list was one full profile fetch per row.
     custom_status: Option<ProfileCustomStatusResponse>,
     flags: ProfileFlagsResponse,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ProfileSummaryListResponse {
-    pub items: Vec<ProfileSummaryResponse>,
 }
 
 impl ProfileSummaryResponse {
@@ -734,15 +743,6 @@ pub struct LoginResponse {
     pub token: String,
 }
 
-/// Collection envelope. `next_cursor` is
-/// always `null` here: a max-4-item session list has no real pagination
-/// need, but the shape stays consistent with the rest of the API.
-#[derive(Debug, Serialize)]
-pub struct SessionListResponse {
-    pub items: Vec<SessionResponse>,
-    pub next_cursor: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct CreateServerRequest {
     pub name: String,
@@ -785,15 +785,6 @@ impl From<domain::ServerSummary> for ServerResponse {
             created_at: server.created_at,
         }
     }
-}
-
-/// Collection envelope. `next_cursor`
-/// stays `null`: no real pagination need at M0 scale (a handful of
-/// friends' servers).
-#[derive(Debug, Serialize)]
-pub struct ServerListResponse {
-    pub items: Vec<ServerResponse>,
-    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -883,11 +874,6 @@ pub struct ChannelRolePermissionResponse {
     pub permissions: i64,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ChannelRolePermissionListResponse {
-    pub items: Vec<ChannelRolePermissionResponse>,
-}
-
 /// `root_message_id` omitted or `null` means a standalone thread
 /// (a new top-level topic in the channel) rather than a reply thread spawned
 /// from an existing message.
@@ -919,14 +905,6 @@ pub struct UpdateChannelVisibilityRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateServerVisibilityRequest {
     pub visibility: String,
-}
-
-/// Collection envelope. `next_cursor`
-/// stays `null`: no real pagination need at M0 scale.
-#[derive(Debug, Serialize)]
-pub struct ChannelListResponse {
-    pub items: Vec<ChannelResponse>,
-    pub next_cursor: Option<String>,
 }
 
 /// One member of a server: their public profile plus the role they hold
@@ -978,15 +956,6 @@ impl ServerMemberResponse {
     }
 }
 
-/// Collection envelope. `next_cursor`
-/// stays `null`: no real pagination need at M0 scale (a handful of friends
-/// per server).
-#[derive(Debug, Serialize)]
-pub struct ServerMemberListResponse {
-    pub items: Vec<ServerMemberResponse>,
-    pub next_cursor: Option<String>,
-}
-
 /// A `server_role` row (M2).
 #[derive(Debug, Serialize)]
 pub struct RoleResponse {
@@ -1016,12 +985,6 @@ impl From<domain::RoleSummary> for RoleResponse {
             mentionable: role.mentionable,
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-pub struct RoleListResponse {
-    pub items: Vec<RoleResponse>,
-    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1101,12 +1064,6 @@ impl From<domain::BanSummary> for BanResponse {
             created_at: ban.created_at,
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-pub struct BanListResponse {
-    pub items: Vec<BanResponse>,
-    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1264,16 +1221,6 @@ pub struct UpdateNicknameRequest {
     pub nickname: Option<String>,
 }
 
-/// Collection envelope. Unlike the other
-/// list responses in this file, `next_cursor` here is real: the last item's
-/// id when a full page came back (there may be more to page to), `null`
-/// when the page came back short (nothing older is left).
-#[derive(Debug, Serialize)]
-pub struct MessageListResponse {
-    pub items: Vec<MessageResponse>,
-    pub next_cursor: Option<String>,
-}
-
 /// `POST /dms` body (ROADMAP slice 6): the other participant of the 1:1 dm
 /// to get-or-create.
 #[derive(Debug, Deserialize)]
@@ -1326,15 +1273,6 @@ impl From<domain::FriendshipSummary> for FriendshipResponse {
     }
 }
 
-/// Collection envelope. `next_cursor`
-/// stays `null`: no real pagination need at M0 scale (a handful of
-/// friends).
-#[derive(Debug, Serialize)]
-pub struct FriendshipListResponse {
-    pub items: Vec<FriendshipResponse>,
-    pub next_cursor: Option<String>,
-}
-
 /// `POST /blocks` body.
 #[derive(Debug, Deserialize)]
 pub struct CreateBlockRequest {
@@ -1358,12 +1296,4 @@ impl From<domain::BlockSummary> for BlockResponse {
             created_at: block.created_at,
         }
     }
-}
-
-/// Collection envelope. `next_cursor`
-/// stays `null`: no real pagination need at M0 scale.
-#[derive(Debug, Serialize)]
-pub struct BlockListResponse {
-    pub items: Vec<BlockResponse>,
-    pub next_cursor: Option<String>,
 }

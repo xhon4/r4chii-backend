@@ -15,18 +15,15 @@ use uuid::Uuid;
 
 use crate::{
     dto::{
-        AccountResponse, BanListResponse, BanResponse, BlockListResponse, BlockResponse,
-        BulkProfilesRequest, ChannelListResponse, ChannelResponse,
-        ChannelRolePermissionListResponse, ChannelRolePermissionResponse, CreateBanRequest,
-        CreateBlockRequest, CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest,
-        CreateRoleRequest, CreateServerRequest, CreateThreadRequest, EditMessageRequest,
-        ExportJobResponse, FriendshipListResponse, FriendshipResponse, LoginRequest, LoginResponse,
-        MemberRolesResponse, MessageListQuery, MessageListResponse, MessageResponse,
-        MessageSearchQuery, ProfileQuery, ProfileResponse, ProfileSummaryListResponse,
+        AccountResponse, BanResponse, BlockResponse, BulkProfilesRequest, ChannelResponse,
+        ChannelRolePermissionResponse, CreateBanRequest, CreateBlockRequest, CreateChannelRequest,
+        CreateDmRequest, CreateGroupDmRequest, CreateRoleRequest, CreateServerRequest,
+        CreateThreadRequest, EditMessageRequest, ExportJobResponse, FriendshipResponse,
+        ListResponse, LoginRequest, LoginResponse, MemberRolesResponse, MessageListQuery,
+        MessageResponse, MessageSearchQuery, PagedResponse, ProfileQuery, ProfileResponse,
         ProfileSummaryResponse, RegisterRequest, ReorderRolesRequest, ResendCodeRequest,
-        RoleListResponse, RoleResponse, SendFriendRequestRequest, SendMessageRequest,
-        ServerListResponse, ServerMemberListResponse, ServerMemberResponse, ServerResponse,
-        SessionListResponse, SetChannelRolePermissionRequest, SetMemberRolesRequest,
+        RoleResponse, SendFriendRequestRequest, SendMessageRequest, ServerMemberResponse,
+        ServerResponse, SessionResponse, SetChannelRolePermissionRequest, SetMemberRolesRequest,
         TimeoutRequest, UpdateAccountRequest, UpdateChannelRestrictedRequest,
         UpdateChannelVisibilityRequest, UpdateNicknameRequest, UpdateRoleRequest,
         UpdateServerVisibilityRequest, VerifyRegistrationRequest,
@@ -192,7 +189,7 @@ pub async fn get_accounts_bulk(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
     body: Result<Json<BulkProfilesRequest>, JsonRejection>,
-) -> Result<Json<ProfileSummaryListResponse>, ApiError> {
+) -> Result<Json<ListResponse<ProfileSummaryResponse>>, ApiError> {
     let Json(body) = body?;
     if body.ids.len() > MAX_BULK_PROFILE_IDS {
         return Err(ApiError::from(domain::DomainError::Validation(format!(
@@ -225,7 +222,7 @@ pub async fn get_accounts_bulk(
         .collect();
     let presence = state.realtime.presence_snapshot(&exposed).await;
 
-    Ok(Json(ProfileSummaryListResponse {
+    Ok(Json(ListResponse {
         items: decided
             .into_iter()
             .map(|(ctx, decision)| {
@@ -268,10 +265,10 @@ pub async fn update_own_account(
 pub async fn list_sessions(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
-) -> Result<Json<SessionListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<SessionResponse>>, ApiError> {
     let sessions = state.auth.list_sessions(context.account_id).await?;
 
-    Ok(Json(SessionListResponse {
+    Ok(Json(PagedResponse {
         items: sessions.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
@@ -313,10 +310,10 @@ pub async fn create_server(
 pub async fn list_servers(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
-) -> Result<Json<ServerListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<ServerResponse>>, ApiError> {
     let servers = state.domain.list_servers(context.account_id).await?;
 
-    Ok(Json(ServerListResponse {
+    Ok(Json(PagedResponse {
         items: servers.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
@@ -355,13 +352,13 @@ pub async fn list_channels(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
     Path(server_id): Path<Uuid>,
-) -> Result<Json<ChannelListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<ChannelResponse>>, ApiError> {
     let channels = state
         .domain
         .list_channels(context.account_id, server_id)
         .await?;
 
-    Ok(Json(ChannelListResponse {
+    Ok(Json(PagedResponse {
         items: channels.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
@@ -374,14 +371,14 @@ pub async fn search_messages(
     AuthenticatedUser(context): AuthenticatedUser,
     Path(server_id): Path<Uuid>,
     query: Result<Query<MessageSearchQuery>, QueryRejection>,
-) -> Result<Json<MessageListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<MessageResponse>>, ApiError> {
     let Query(query) = query?;
     let messages = state
         .domain
         .search_messages(context.account_id, server_id, query.into())
         .await?;
 
-    Ok(Json(MessageListResponse {
+    Ok(Json(PagedResponse {
         items: messages.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
@@ -444,13 +441,13 @@ pub async fn list_channel_role_permissions(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
     Path(channel_id): Path<Uuid>,
-) -> Result<Json<ChannelRolePermissionListResponse>, ApiError> {
+) -> Result<Json<ListResponse<ChannelRolePermissionResponse>>, ApiError> {
     let grants = state
         .domain
         .list_channel_role_permissions(context.account_id, channel_id)
         .await?;
 
-    Ok(Json(ChannelRolePermissionListResponse {
+    Ok(Json(ListResponse {
         items: grants
             .into_iter()
             .map(|(role_id, permissions)| ChannelRolePermissionResponse {
@@ -484,7 +481,7 @@ pub async fn list_members(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
     Path(server_id): Path<Uuid>,
-) -> Result<Json<ServerMemberListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<ServerMemberResponse>>, ApiError> {
     let members = state
         .domain
         .list_members(context.account_id, server_id)
@@ -507,7 +504,7 @@ pub async fn list_members(
         .into_iter()
         .collect();
 
-    Ok(Json(ServerMemberListResponse {
+    Ok(Json(PagedResponse {
         items: members
             .into_iter()
             .map(|member| {
@@ -563,10 +560,10 @@ pub async fn create_dm(
 pub async fn list_dms(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
-) -> Result<Json<ChannelListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<ChannelResponse>>, ApiError> {
     let channels = state.domain.list_dms(context.account_id).await?;
 
-    Ok(Json(ChannelListResponse {
+    Ok(Json(PagedResponse {
         items: channels.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
@@ -611,10 +608,10 @@ pub async fn send_friend_request(
 pub async fn list_friendships(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
-) -> Result<Json<FriendshipListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<FriendshipResponse>>, ApiError> {
     let friendships = state.domain.list_friendships(context.account_id).await?;
 
-    Ok(Json(FriendshipListResponse {
+    Ok(Json(PagedResponse {
         items: friendships.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
@@ -659,10 +656,10 @@ pub async fn create_block(
 pub async fn list_blocks(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
-) -> Result<Json<BlockListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<BlockResponse>>, ApiError> {
     let blocks = state.domain.list_blocks(context.account_id).await?;
 
-    Ok(Json(BlockListResponse {
+    Ok(Json(PagedResponse {
         items: blocks.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
@@ -700,13 +697,13 @@ pub async fn list_threads(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
     Path(channel_id): Path<Uuid>,
-) -> Result<Json<ChannelListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<ChannelResponse>>, ApiError> {
     let threads = state
         .domain
         .list_threads(context.account_id, channel_id)
         .await?;
 
-    Ok(Json(ChannelListResponse {
+    Ok(Json(PagedResponse {
         items: threads.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
@@ -746,7 +743,7 @@ pub async fn list_messages(
     AuthenticatedUser(context): AuthenticatedUser,
     Path(channel_id): Path<Uuid>,
     query: Result<Query<MessageListQuery>, QueryRejection>,
-) -> Result<Json<MessageListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<MessageResponse>>, ApiError> {
     let Query(query) = query?;
     // The exact clamp `domain::DomainService::list_messages` itself applies —
     // reused here (not reinvented) purely to decide whether the page that
@@ -778,7 +775,7 @@ pub async fn list_messages(
         None
     };
 
-    Ok(Json(MessageListResponse {
+    Ok(Json(PagedResponse {
         items: messages.into_iter().map(Into::into).collect(),
         next_cursor,
     }))
@@ -876,13 +873,13 @@ pub async fn list_pinned_messages(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
     Path(channel_id): Path<Uuid>,
-) -> Result<Json<MessageListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<MessageResponse>>, ApiError> {
     let messages = state
         .domain
         .list_pinned_messages(context.account_id, channel_id)
         .await?;
 
-    Ok(Json(MessageListResponse {
+    Ok(Json(PagedResponse {
         items: messages.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
@@ -913,13 +910,13 @@ pub async fn list_roles(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
     Path(server_id): Path<Uuid>,
-) -> Result<Json<RoleListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<RoleResponse>>, ApiError> {
     let roles = state
         .domain
         .list_roles(context.account_id, server_id)
         .await?;
 
-    Ok(Json(RoleListResponse {
+    Ok(Json(PagedResponse {
         items: roles.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
@@ -970,7 +967,7 @@ pub async fn reorder_roles(
     AuthenticatedUser(context): AuthenticatedUser,
     Path(server_id): Path<Uuid>,
     body: Result<Json<ReorderRolesRequest>, JsonRejection>,
-) -> Result<Json<RoleListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<RoleResponse>>, ApiError> {
     let Json(body) = body?;
     let roles = state
         .domain
@@ -983,7 +980,7 @@ pub async fn reorder_roles(
         }
     }
 
-    Ok(Json(RoleListResponse {
+    Ok(Json(PagedResponse {
         items: roles.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
@@ -1041,13 +1038,13 @@ pub async fn list_bans(
     State(state): State<AppState>,
     AuthenticatedUser(context): AuthenticatedUser,
     Path(server_id): Path<Uuid>,
-) -> Result<Json<BanListResponse>, ApiError> {
+) -> Result<Json<PagedResponse<BanResponse>>, ApiError> {
     let bans = state
         .domain
         .list_server_bans(context.account_id, server_id)
         .await?;
 
-    Ok(Json(BanListResponse {
+    Ok(Json(PagedResponse {
         items: bans.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
