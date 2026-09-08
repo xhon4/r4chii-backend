@@ -1003,13 +1003,135 @@ async fn bulk_hydrates_many_profiles_and_preserves_the_requested_order() {
     assert_eq!(bob["avatar_url"], "https://example.com/bob.png");
     assert_eq!(bob["presence"]["online"], true);
     assert_eq!(items[0]["presence"]["online"], false);
-    // The reduced shape carries nothing a visibility setting gates.
-    for absent in ["bio", "pronouns", "links", "custom_status", "server_context"] {
+    // The reduced shape stays reduced. `custom_status` is deliberately not in
+    // this list: it is carried here so a roster can render a line of status
+    // text per member from one bulk request, and it goes through the same
+    // visibility gate the full profile applies to it.
+    for absent in ["bio", "pronouns", "links", "server_context"] {
         assert!(
             bob.get(absent).is_none(),
             "the summary shape must not carry {absent}"
         );
     }
+}
+
+#[tokio::test]
+async fn bulk_carries_the_custom_status_so_a_roster_needs_no_second_request() {
+    let (app, mail, hub, _container) = test_app().await;
+    let (_alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    app.clone()
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            "/api/v1/accounts/me",
+            &bob_token,
+            json!({ "custom_status": { "text": "building something", "emoji": "🛠️" } }),
+        ))
+        .await
+        .expect("custom status update succeeds");
+    let (_handle, _receiver) = hub.register(bob_id.parse().expect("uuid")).await;
+
+    let response = app
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/accounts/bulk",
+            &alice_token,
+            json!({ "ids": [bob_id] }),
+        ))
+        .await
+        .expect("bulk request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let items = body_json(response).await;
+    let bob = &items["items"][0];
+    assert_eq!(bob["custom_status"]["text"], "building something");
+    assert_eq!(bob["custom_status"]["emoji"], "🛠️");
+    assert!(
+        bob["custom_status"]["expires_at"].is_null(),
+        "no expiry was set, so none is reported"
+    );
+}
+
+#[tokio::test]
+async fn bulk_never_exposes_more_custom_status_than_the_full_profile() {
+    let (app, mail, hub, container) = test_app().await;
+    let (alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+    let (carol_id, carol_token) =
+        register_and_login(&app, &mail, "carol@example.com", "carol").await;
+
+    for token in [&bob_token, &carol_token] {
+        app.clone()
+            .oneshot(auth_json_request(
+                Method::PATCH,
+                "/api/v1/accounts/me",
+                token,
+                json!({ "custom_status": { "text": "status text" } }),
+            ))
+            .await
+            .expect("custom status update succeeds");
+    }
+
+    // Bob blocks Alice; Carol is deleted. These are the two paths that change
+    // what Alice may see, and the reduced shape must land on exactly the same
+    // answer as the full profile for both — it exists to save a request, not
+    // to be a second, laxer view of the same account.
+    app.clone()
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/blocks",
+            &bob_token,
+            json!({ "account_id": alice_id }),
+        ))
+        .await
+        .expect("block request succeeds");
+
+    let pool = direct_pool(&container).await;
+    sqlx::query("UPDATE account SET deleted_at = now() WHERE id = $1")
+        .bind(carol_id.parse::<Uuid>().expect("uuid"))
+        .execute(&pool)
+        .await
+        .expect("deleted_at updates");
+
+    let (_bob_handle, _bob_rx) = hub.register(bob_id.parse().expect("uuid")).await;
+    let (_carol_handle, _carol_rx) = hub.register(carol_id.parse().expect("uuid")).await;
+
+    let bulk = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/accounts/bulk",
+            &alice_token,
+            json!({ "ids": [bob_id, carol_id] }),
+        ))
+        .await
+        .expect("bulk request succeeds");
+    let items = body_json(bulk).await;
+
+    for (index, id) in [(0, &bob_id), (1, &carol_id)] {
+        let profile = app
+            .clone()
+            .oneshot(auth_request(
+                Method::GET,
+                &format!("/api/v1/accounts/{id}"),
+                &alice_token,
+            ))
+            .await
+            .expect("profile request succeeds");
+        let profile = body_json(profile).await;
+        assert_eq!(
+            items["items"][index]["custom_status"], profile["custom_status"],
+            "the reduced shape and the full profile must agree about {id}"
+        );
+    }
+
+    assert!(
+        items["items"][1]["custom_status"].is_null(),
+        "a tombstoned account carries no status text in either shape"
+    );
 }
 
 #[tokio::test]

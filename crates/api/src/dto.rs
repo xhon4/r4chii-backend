@@ -172,8 +172,8 @@ pub struct BulkProfilesRequest {
 }
 
 /// The reduced profile shape for hydrating member lists and message authors:
-/// enough to render a name, an avatar and a presence dot, and nothing that a
-/// visibility setting gates. Same construction rule as [`ProfileResponse`] —
+/// enough to render a row — a name, an avatar, a presence dot and the line of
+/// status text under it. Same construction rule as [`ProfileResponse`] —
 /// private fields, one constructor, no way in from a raw row.
 #[derive(Debug, Serialize)]
 pub struct ProfileSummaryResponse {
@@ -183,6 +183,11 @@ pub struct ProfileSummaryResponse {
     avatar_url: Option<String>,
     accent_color: Option<String>,
     presence: ProfilePresenceResponse,
+    /// Gated by the same visibility decision [`ProfileResponse`] applies to
+    /// it. It is carried here so a roster can render one line per member from
+    /// a single bulk request; without it the only way to show status text in
+    /// a list was one full profile fetch per row.
+    custom_status: Option<ProfileCustomStatusResponse>,
     flags: ProfileFlagsResponse,
 }
 
@@ -192,9 +197,10 @@ pub struct ProfileSummaryListResponse {
 }
 
 impl ProfileSummaryResponse {
-    /// Maps the subset of `decision` this shape can carry. Fields gated by a
-    /// visibility setting are not in the shape at all, so identity, media and
-    /// presence are the only exposures that apply.
+    /// Maps the subset of `decision` this shape can carry: identity, media,
+    /// presence and the custom status. The exposures this shape has no field
+    /// for — bio, communities, friends, relationship, server context — are
+    /// simply not read.
     pub(crate) fn build(
         ctx: domain::ProfileContext,
         decision: domain::ProfileVisibilityDecision,
@@ -223,6 +229,23 @@ impl ProfileSummaryResponse {
             },
         };
 
+        // The same gate `ProfileResponse` applies, read from the same
+        // decision. A deleted account needs no extra check here — the domain's
+        // tombstone decision already hides this field, and re-deciding that in
+        // the DTO would mean two places to change if the rule ever moves.
+        let custom_status = match decision.custom_status {
+            domain::ProfileFieldExposure::Visible => {
+                profile
+                    .custom_status
+                    .map(|text| ProfileCustomStatusResponse {
+                        text,
+                        emoji: profile.custom_emoji,
+                        expires_at: profile.custom_expires_at,
+                    })
+            }
+            domain::ProfileFieldExposure::Hidden => None,
+        };
+
         Self {
             id: profile.id,
             username: profile.username,
@@ -230,6 +253,7 @@ impl ProfileSummaryResponse {
             avatar_url,
             accent_color,
             presence,
+            custom_status,
             flags: ProfileFlagsResponse {
                 deleted: decision.identity == domain::ProfileIdentityExposure::Tombstone,
                 system: false,
