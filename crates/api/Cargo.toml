@@ -11,7 +11,6 @@ auth = { version = "0.1.0", path = "../auth" }
 axum = { version = "0.8.9", features = ["ws", "multipart"] }
 axum-extra = { version = "0.12.6", features = ["cookie", "typed-header"] }
 chrono = { version = "0.4.45", features = ["serde"] }
-cookie = "0.18.2"
 domain = { version = "0.1.0", path = "../domain" }
 governor = "0.10.4"
 realtime = { version = "0.1.0", path = "../realtime" }

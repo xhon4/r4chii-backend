@@ -41,7 +41,12 @@ fn verify_body(email: &str, code: &str) -> Value {
 
 /// Drives the two-step signup end to end: start, then verify with the mailed
 /// code. Returns the account body.
-async fn signup(app: &axum::Router, mail: &mailer::CaptureMailer, email: &str, username: &str) -> Value {
+async fn signup(
+    app: &axum::Router,
+    mail: &mailer::CaptureMailer,
+    email: &str,
+    username: &str,
+) -> Value {
     let start = app
         .clone()
         .oneshot(json_request(
@@ -249,8 +254,13 @@ async fn login_with_correct_credentials_returns_201_with_cookie_and_token() {
         .to_str()
         .expect("Set-Cookie header is valid UTF-8")
         .to_string();
+    let set_cookie_lower = set_cookie.to_ascii_lowercase();
     assert!(set_cookie.contains("r4chii_session="));
-    assert!(set_cookie.to_ascii_lowercase().contains("httponly"));
+    assert!(set_cookie_lower.contains("httponly"));
+    assert!(set_cookie_lower.contains("secure"));
+    assert!(set_cookie_lower.contains("samesite=lax"));
+    assert!(set_cookie_lower.contains("path=/"));
+    assert!(set_cookie_lower.contains("max-age=1209600"));
 
     let body = body_json(login_response).await;
     assert!(body["token"].as_str().is_some_and(|t| !t.is_empty()));
@@ -368,10 +378,13 @@ async fn deleting_someone_elses_session_returns_404() {
     // judy tries to delete ivan's session by id.
     let response = app
         .oneshot(
-            request(Method::DELETE, &format!("/api/v1/sessions/{ivan_session_id}"))
-                .header(header::AUTHORIZATION, format!("Bearer {judy_token}"))
-                .body(Body::empty())
-                .expect("request builds"),
+            request(
+                Method::DELETE,
+                &format!("/api/v1/sessions/{ivan_session_id}"),
+            )
+            .header(header::AUTHORIZATION, format!("Bearer {judy_token}"))
+            .body(Body::empty())
+            .expect("request builds"),
         )
         .await
         .expect("request succeeds");
