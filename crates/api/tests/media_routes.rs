@@ -1,10 +1,7 @@
 //! Avatar and banner upload, and the route that serves them.
 //!
-//! These run without object storage configured, which is what `AppState`
-//! carries in every test harness here. That covers authentication, the
-//! validation of an upload, and the ordering between the two — but the write
-//! itself and the signed redirect are only exercised against a live
-//! S3-compatible endpoint, which this suite does not stand up.
+//! Most tests run without object storage configured. The ignored live test
+//! covers the upload and signed redirect against a S3-compatible endpoint.
 
 use axum::{
     body::Body,
@@ -18,7 +15,7 @@ use common::*;
 
 /// A one pixel PNG. Inline rather than encoded here so these tests need no
 /// image library of their own.
-const TINY_PNG: &[u8] = &[
+const TINY_PNG: &[u8; 69] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0,
     0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 224, 170, 56, 1, 0, 1, 218,
     1, 75, 16, 251, 241, 0, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
@@ -57,13 +54,10 @@ fn upload_request(uri: &str, token: Option<&str>, bytes: &[u8]) -> Request<Body>
 async fn uploading_without_a_session_is_unauthenticated() {
     let (app, _mail, _container) = test_app().await;
 
-    for uri in [
-        "/api/v1/accounts/me/avatar",
-        "/api/v1/accounts/me/banner",
-    ] {
+    for uri in ["/api/v1/accounts/me/avatar", "/api/v1/accounts/me/banner"] {
         let response = app
             .clone()
-            .oneshot(upload_request(uri, None, TINY_PNG))
+            .oneshot(upload_request(uri, None, TINY_PNG.as_slice()))
             .await
             .expect("request succeeds");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
@@ -101,7 +95,7 @@ async fn an_upload_that_is_not_an_image_is_rejected() {
         .oneshot(upload_request(
             "/api/v1/accounts/me/avatar",
             Some(&token),
-            b"this is not a png, whatever the filename says",
+            b"this is not a png, whatever the filename says".as_slice(),
         ))
         .await
         .expect("request succeeds");
@@ -122,7 +116,7 @@ async fn a_valid_upload_reaches_storage_and_reports_it_missing() {
         .oneshot(upload_request(
             "/api/v1/accounts/me/avatar",
             Some(&token),
-            TINY_PNG,
+            TINY_PNG.as_slice(),
         ))
         .await
         .expect("request succeeds");
@@ -153,4 +147,82 @@ async fn a_media_key_cannot_escape_its_prefix() {
         .expect("request succeeds");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore = "needs a live S3-compatible endpoint and the S3_* environment"]
+async fn avatar_upload_round_trips_through_live_storage() {
+    let (app, mail, _hub, _test_db, storage) = test_app_with_storage().await;
+    let (_account_id, token) =
+        register_and_login(&app, &mail, "storage-avatar@example.com", "storageavatar").await;
+
+    let upload = app
+        .clone()
+        .oneshot(upload_request(
+            "/api/v1/accounts/me/avatar",
+            Some(&token),
+            TINY_PNG.as_slice(),
+        ))
+        .await
+        .expect("upload request succeeds");
+    assert_eq!(upload.status(), StatusCode::OK);
+    let upload_body = body_json(upload).await;
+    let avatar_url = upload_body["avatar_url"]
+        .as_str()
+        .expect("the upload response includes the avatar URL");
+    let key = avatar_url
+        .strip_prefix("/api/v1/media/")
+        .expect("the avatar URL is served by the media route")
+        .to_string();
+
+    let result = async {
+        let persisted = app
+            .clone()
+            .oneshot(auth_request(Method::GET, "/api/v1/accounts/me", &token))
+            .await
+            .map_err(|err| err.to_string())?;
+        if persisted.status() != StatusCode::OK {
+            return Err(format!("profile reread returned {}", persisted.status()));
+        }
+        if body_json(persisted).await["avatar_url"] != avatar_url {
+            return Err("the avatar URL was not persisted".to_string());
+        }
+
+        let redirect = app
+            .clone()
+            .oneshot(auth_request(Method::GET, avatar_url, &token))
+            .await
+            .map_err(|err| err.to_string())?;
+        if redirect.status() != StatusCode::TEMPORARY_REDIRECT {
+            return Err(format!("media route returned {}", redirect.status()));
+        }
+        let location = redirect
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| "media redirect lacks a valid Location header".to_string())?;
+        if !location.contains("X-Amz-Signature=") {
+            return Err("media redirect is not signed".to_string());
+        }
+
+        let image = reqwest::get(location)
+            .await
+            .map_err(|err| err.to_string())?;
+        if image.status() != StatusCode::OK {
+            return Err(format!("signed download returned {}", image.status()));
+        }
+        let bytes = image.bytes().await.map_err(|err| err.to_string())?;
+        if !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+            return Err("stored image is not the processed JPEG".to_string());
+        }
+
+        Ok(())
+    }
+    .await;
+
+    storage
+        .delete_object(&key)
+        .await
+        .expect("the uploaded object is cleaned up");
+    result.expect("the uploaded avatar round trips through storage");
 }

@@ -24,12 +24,9 @@ use tower::ServiceExt;
 
 /// The router under test, the mailbox its verification codes land in, the
 /// realtime hub it publishes through, and the database holding it all up.
-pub async fn test_app_with_hub() -> (
-    axum::Router,
-    mailer::CaptureMailer,
-    realtime::Hub,
-    TestDb,
-) {
+async fn build_test_app(
+    storage: Option<storage::StorageService>,
+) -> (axum::Router, mailer::CaptureMailer, realtime::Hub, TestDb) {
     let test_db = test_support::test_db().await;
     let pool = test_db.pool();
 
@@ -39,11 +36,29 @@ pub async fn test_app_with_hub() -> (
         auth: auth::AuthService::new(pool, std::sync::Arc::new(mail.clone())),
         domain: domain.clone(),
         realtime: realtime::Hub::new(domain),
-        storage: None,
+        storage,
     };
     let hub = state.realtime.clone();
 
     (api::router(state), mail, hub, test_db)
+}
+
+pub async fn test_app_with_hub() -> (axum::Router, mailer::CaptureMailer, realtime::Hub, TestDb) {
+    build_test_app(None).await
+}
+
+/// Builds an application that uses the configured S3-compatible endpoint.
+pub async fn test_app_with_storage() -> (
+    axum::Router,
+    mailer::CaptureMailer,
+    realtime::Hub,
+    TestDb,
+    storage::StorageService,
+) {
+    let storage = storage::StorageService::from_env()
+        .expect("the S3_* environment must be complete for a storage test");
+    let (app, mail, hub, test_db) = build_test_app(Some(storage.clone())).await;
+    (app, mail, hub, test_db, storage)
 }
 
 /// The same application, for suites with nothing to say about realtime.
@@ -94,7 +109,12 @@ pub fn auth_request(method: Method, uri: &str, token: &str) -> Request<Body> {
 }
 
 pub async fn body_json(response: axum::response::Response) -> Value {
-    let bytes = response.into_body().collect().await.expect("body collects").to_bytes();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body collects")
+        .to_bytes();
     serde_json::from_slice(&bytes).expect("body is valid JSON")
 }
 
