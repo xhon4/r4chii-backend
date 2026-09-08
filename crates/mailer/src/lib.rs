@@ -107,8 +107,8 @@ impl SmtpMailer {
             .parse()
             .map_err(|err| MailError::Config(format!("invalid SMTP_FROM address: {err}")))?;
 
-        let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.host)
-            .port(config.port);
+        let mut builder =
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.host).port(config.port);
 
         builder = match config.security {
             SmtpSecurity::StartTls => {
@@ -265,7 +265,10 @@ mod tests {
             SmtpSecurity::parse(" implicit_tls ").expect("parses"),
             SmtpSecurity::ImplicitTls
         );
-        assert_eq!(SmtpSecurity::parse("none").expect("parses"), SmtpSecurity::None);
+        assert_eq!(
+            SmtpSecurity::parse("none").expect("parses"),
+            SmtpSecurity::None
+        );
     }
 
     #[test]

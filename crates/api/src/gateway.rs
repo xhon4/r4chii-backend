@@ -182,7 +182,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, token: Option<Str
 /// Waits (bounded) for the client's first frame to be a valid `identify`.
 /// Returns `None` on timeout, a read error, a non-text frame, or any frame
 /// that isn't a well-formed `identify` with a token that verifies.
-async fn wait_for_identify(socket: &mut WebSocket, state: &AppState) -> Option<app_core::AuthContext> {
+async fn wait_for_identify(
+    socket: &mut WebSocket,
+    state: &AppState,
+) -> Option<app_core::AuthContext> {
     let text = match timeout(IDENTIFY_TIMEOUT, socket.recv()).await {
         Ok(Some(Ok(Message::Text(text)))) => text,
         _ => return None,

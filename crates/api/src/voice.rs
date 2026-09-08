@@ -320,7 +320,11 @@ fn configured(key: &str) -> Option<String> {
 /// so both the production path and its tests call the SAME decision instead
 /// of the tests hand-copying these match arms and silently drifting from
 /// whatever this function is changed to later.
-fn should_write_cache(current: &Option<CachedIce>, minted: &Option<Vec<IceServer>>, now: Instant) -> bool {
+fn should_write_cache(
+    current: &Option<CachedIce>,
+    minted: &Option<Vec<IceServer>>,
+    now: Instant,
+) -> bool {
     match (current, minted) {
         // Success always updates the cache with fresh credentials.
         (_, Some(_)) => true,

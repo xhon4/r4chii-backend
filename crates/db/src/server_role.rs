@@ -266,7 +266,10 @@ pub async fn role_ids_for_server_members(
     .bind(server_id)
     .fetch_all(executor)
     .await?;
-    Ok(rows.into_iter().map(|r| (r.account_id, r.role_id)).collect())
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.account_id, r.role_id))
+        .collect())
 }
 
 /// Clears a membership's full explicit role set — step one of "replace it",

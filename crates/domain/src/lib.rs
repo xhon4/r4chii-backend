@@ -2,10 +2,10 @@
 //! services + authorization logic. Depends on: core, db,
 //! auth (see crates/domain/Cargo.toml).
 
-mod error;
-mod media;
-mod invite;
 pub mod channel_permissions;
+mod error;
+mod invite;
+mod media;
 pub mod permissions;
 mod profile_visibility;
 mod service;
@@ -26,6 +26,6 @@ pub use types::{
     BanSummary, BlockSummary, ChannelSummary, CreateChannelInput, CreateGroupDmInput,
     CreateRoleInput, CreateServerInput, CreateThreadInput, EditMessageInput, ExportJobSummary,
     FriendshipSummary, MessagePagination, MessageSummary, PublicMessageSummary, RoleSummary,
-    SearchInput, SendMessageInput, ServerMemberSummary, ServerSummary, SitemapThread,
-    TimeoutInput, UpdateRoleInput,
+    SearchInput, SendMessageInput, ServerMemberSummary, ServerSummary, SitemapThread, TimeoutInput,
+    UpdateRoleInput,
 };

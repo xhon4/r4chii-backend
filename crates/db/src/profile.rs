@@ -223,9 +223,9 @@ pub async fn find_id_by_username(
     sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM account WHERE username_normalized = lower(normalize($1, NFKC))",
     )
-        .bind(username)
-        .fetch_optional(pool)
-        .await
+    .bind(username)
+    .fetch_optional(pool)
+    .await
 }
 
 /// Resolves per-server profile context from the existing membership and role

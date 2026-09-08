@@ -168,9 +168,8 @@ pub(crate) fn validate_banner_url(banner_url: &str) -> Result<(), AuthError> {
 /// purpose: one stored shape means the client never has to normalise before
 /// rendering, and the database CHECK can be exact.
 pub(crate) fn validate_accent_color(accent_color: &str) -> Result<(), AuthError> {
-    let invalid = || {
-        AuthError::Validation("accent color must be a hex value like #ffa800".to_string())
-    };
+    let invalid =
+        || AuthError::Validation("accent color must be a hex value like #ffa800".to_string());
 
     let Some(digits) = accent_color.strip_prefix('#') else {
         return Err(invalid());
@@ -551,7 +550,10 @@ mod tests {
         assert!(validate_pronouns("she/her").is_ok());
         assert!(validate_pronouns("they/them").is_ok());
         assert!(validate_pronouns("he/him").is_ok());
-        assert!(validate_pronouns("a/b").is_ok(), "one letter per side is fine");
+        assert!(
+            validate_pronouns("a/b").is_ok(),
+            "one letter per side is fine"
+        );
     }
 
     /// What the five-letter, single-slash rule costs, written down so the
@@ -561,7 +563,10 @@ mod tests {
     #[test]
     fn validate_pronouns_rejects_some_legitimate_real_world_forms() {
         assert!(validate_pronouns("he/him/his").is_err(), "three-part form");
-        assert!(validate_pronouns("their/theirs").is_err(), "6 letters right");
+        assert!(
+            validate_pronouns("their/theirs").is_err(),
+            "6 letters right"
+        );
         assert!(validate_pronouns("nosotres/nosotres").is_err(), "8 letters");
     }
 
@@ -580,8 +585,14 @@ mod tests {
         assert!(validate_pronouns("/her").is_err(), "empty left side");
         assert!(validate_pronouns("she/").is_err(), "empty right side");
         assert!(validate_pronouns("their/theirs").is_err(), "over 5 a side");
-        assert!(validate_pronouns("12/34").is_err(), "digits are not letters");
-        assert!(validate_pronouns("s e/h e").is_err(), "spaces are not letters");
+        assert!(
+            validate_pronouns("12/34").is_err(),
+            "digits are not letters"
+        );
+        assert!(
+            validate_pronouns("s e/h e").is_err(),
+            "spaces are not letters"
+        );
         assert!(validate_pronouns("").is_err());
     }
 
@@ -659,7 +670,10 @@ mod tests {
 
     #[test]
     fn sanitize_custom_status_emoji_accepts_wide_single_grapheme_sequences() {
-        for wide in ["\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}", "👨🏻\u{200D}👩🏽\u{200D}👧🏾\u{200D}👦🏿"] {
+        for wide in [
+            "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
+            "👨🏻\u{200D}👩🏽\u{200D}👧🏾\u{200D}👦🏿",
+        ] {
             assert!(
                 sanitize_custom_status_emoji(wide).is_ok(),
                 "{wide} is one grapheme cluster"

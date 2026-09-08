@@ -67,8 +67,10 @@ pub fn router(state: AppState) -> Router {
     // Requires `axum::serve` to be called with
     // `into_make_service_with_connect_info::<SocketAddr>()` so the governor
     // can see the real peer IP (wired in crates/server/src/lib.rs).
-    let rate_limited_config: GovernorConfig<PeerIpKeyExtractor, governor::middleware::NoOpMiddleware<governor::clock::QuantaInstant>> =
-        GovernorConfig::secure();
+    let rate_limited_config: GovernorConfig<
+        PeerIpKeyExtractor,
+        governor::middleware::NoOpMiddleware<governor::clock::QuantaInstant>,
+    > = GovernorConfig::secure();
 
     let rate_limited = Router::new()
         .route("/api/v1/registrations", post(handlers::start_registration))
@@ -196,7 +198,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/servers/{id}/members", get(handlers::list_members))
         // ---- search ----
-        .route("/api/v1/servers/{id}/search", get(handlers::search_messages))
+        .route(
+            "/api/v1/servers/{id}/search",
+            get(handlers::search_messages),
+        )
         // ---- full export ----
         // POST (create) is on the rate-limited `moderation` router above;
         // GET (poll status) is unrestricted like every other read here.
@@ -291,10 +296,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/channels/{id}/threads",
             post(handlers::create_thread),
         )
-        .route(
-            "/api/v1/channels/{id}/threads",
-            get(handlers::list_threads),
-        )
+        .route("/api/v1/channels/{id}/threads", get(handlers::list_threads))
         .route(
             "/api/v1/channels/{id}/messages",
             post(handlers::send_message),

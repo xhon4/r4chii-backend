@@ -12,8 +12,8 @@ use crate::types::{
     BanSummary, BlockSummary, ChannelSummary, CreateChannelInput, CreateGroupDmInput,
     CreateRoleInput, CreateServerInput, CreateThreadInput, EditMessageInput, ExportJobSummary,
     FriendshipSummary, MessagePagination, MessageSummary, PublicMessageSummary, RoleSummary,
-    SearchInput, SendMessageInput, ServerMemberSummary, ServerSummary, SitemapThread,
-    TimeoutInput, UpdateRoleInput,
+    SearchInput, SendMessageInput, ServerMemberSummary, ServerSummary, SitemapThread, TimeoutInput,
+    UpdateRoleInput,
 };
 use crate::validation::{
     extract_mention_tokens, slugify, validate_channel_kind, validate_channel_name,
@@ -445,7 +445,8 @@ impl DomainService {
         let rows = db::server::list_members(&self.pool, server_id).await?;
         // One extra bulk query rather than one per row (M2) — see
         // `role_ids_for_server_members`'s own doc comment.
-        let role_pairs = db::server_role::role_ids_for_server_members(&self.pool, server_id).await?;
+        let role_pairs =
+            db::server_role::role_ids_for_server_members(&self.pool, server_id).await?;
 
         let mut members: Vec<ServerMemberSummary> = rows.into_iter().map(Into::into).collect();
         for member in &mut members {
@@ -561,7 +562,9 @@ impl DomainService {
         parent_channel_id: Uuid,
         input: CreateThreadInput,
     ) -> Result<ChannelSummary, DomainError> {
-        let parent = self.require_channel_access(account_id, parent_channel_id).await?;
+        let parent = self
+            .require_channel_access(account_id, parent_channel_id)
+            .await?;
 
         if parent.kind == "thread" {
             return Err(DomainError::Validation(
@@ -649,16 +652,19 @@ impl DomainService {
         if let Some(value) = &visibility {
             if visibility_rank(value) > visibility_rank(&server.visibility) {
                 return Err(DomainError::Validation(
-                    "channel visibility cannot be broader than its server's visibility"
-                        .to_string(),
+                    "channel visibility cannot be broader than its server's visibility".to_string(),
                 ));
             }
         }
 
-        let updated =
-            db::channel::update_visibility(&self.pool, channel_id, server_id, visibility.as_deref())
-                .await?
-                .ok_or(DomainError::ChannelNotFound)?;
+        let updated = db::channel::update_visibility(
+            &self.pool,
+            channel_id,
+            server_id,
+            visibility.as_deref(),
+        )
+        .await?
+        .ok_or(DomainError::ChannelNotFound)?;
 
         Ok(updated.into())
     }
@@ -688,9 +694,10 @@ impl DomainService {
             ));
         }
 
-        let updated = db::channel::set_channel_restricted(&self.pool, channel_id, server_id, restricted)
-            .await?
-            .ok_or(DomainError::ChannelNotFound)?;
+        let updated =
+            db::channel::set_channel_restricted(&self.pool, channel_id, server_id, restricted)
+                .await?
+                .ok_or(DomainError::ChannelNotFound)?;
 
         Ok(updated.into())
     }
@@ -733,8 +740,13 @@ impl DomainService {
             | channel_permissions::SEND_MESSAGE
             | channel_permissions::JOIN_VOICE;
 
-        db::channel::upsert_channel_role_permission(&self.pool, channel_id, role_id, bits & known_bits)
-            .await?;
+        db::channel::upsert_channel_role_permission(
+            &self.pool,
+            channel_id,
+            role_id,
+            bits & known_bits,
+        )
+        .await?;
 
         Ok(())
     }
@@ -752,7 +764,10 @@ impl DomainService {
         self.require_channel_access(account_id, channel_id).await?;
 
         let rows = db::channel::channel_role_permissions_for(&self.pool, channel_id).await?;
-        Ok(rows.into_iter().map(|r| (r.role_id, r.permissions)).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.role_id, r.permissions))
+            .collect())
     }
 
     /// Sets `server.visibility` outright — owner-only, checked
@@ -1083,9 +1098,8 @@ impl DomainService {
 
         let (row, changed) = match existing {
             None => {
-                let row =
-                    db::friendship::insert_pending(&mut *tx, new_id(), low, high, account_id)
-                        .await?;
+                let row = db::friendship::insert_pending(&mut *tx, new_id(), low, high, account_id)
+                    .await?;
                 (row, true)
             }
             Some(row) if row.status == "pending" && row.requested_by != account_id => {
@@ -1537,9 +1551,10 @@ impl DomainService {
             .require_permission(account_id, server_id, permissions::MANAGE_ROLES)
             .await?;
 
-        let target_membership = db::channel::find_membership(&self.pool, server_id, target_account_id)
-            .await?
-            .ok_or(DomainError::AccountNotFound)?;
+        let target_membership =
+            db::channel::find_membership(&self.pool, server_id, target_account_id)
+                .await?
+                .ok_or(DomainError::AccountNotFound)?;
 
         let current_role_ids: HashSet<Uuid> =
             db::server_role::role_ids_for_membership(&self.pool, target_membership.id)
@@ -1759,7 +1774,8 @@ impl DomainService {
             recipients.push(target_account_id);
         }
 
-        let removed = db::channel::delete_membership(&self.pool, server_id, target_account_id).await?;
+        let removed =
+            db::channel::delete_membership(&self.pool, server_id, target_account_id).await?;
         if !removed {
             return Err(DomainError::AccountNotFound);
         }
@@ -1773,7 +1789,11 @@ impl DomainService {
     /// Deletion itself is one query: every dependent table cascades from
     /// `server` (`channel`, `membership`, `server_role`, `membership_role`,
     /// `server_ban` — confirmed against the actual DDL, not assumed).
-    pub async fn delete_server(&self, account_id: Uuid, server_id: Uuid) -> Result<(), DomainError> {
+    pub async fn delete_server(
+        &self,
+        account_id: Uuid,
+        server_id: Uuid,
+    ) -> Result<(), DomainError> {
         let server = db::server::get_for_account(&self.pool, account_id, server_id)
             .await?
             .ok_or(DomainError::ServerNotFound)?;
@@ -1790,7 +1810,11 @@ impl DomainService {
     /// this slice: a caller may only act on a server (or its channels) if
     /// they hold a `membership` row for it — the authorization invariant,
     /// enforced here so it lives in exactly one place.
-    async fn require_membership(&self, account_id: Uuid, server_id: Uuid) -> Result<(), DomainError> {
+    async fn require_membership(
+        &self,
+        account_id: Uuid,
+        server_id: Uuid,
+    ) -> Result<(), DomainError> {
         let exists = db::channel::membership_exists(&self.pool, server_id, account_id).await?;
 
         if !exists {
@@ -1875,13 +1899,14 @@ impl DomainService {
             }
         }
 
-        let message = db::message::update_content(&self.pool, message_id, channel_id, &input.content)
-            .await?
-            // `require_own_message` just confirmed this row exists and is ours —
-            // `None` here would mean it vanished in the narrow window between
-            // that check and this statement (M0 concurrency scale, same
-            // residual-race tradeoff as `join_via_invite`'s membership check).
-            .ok_or(DomainError::MessageNotFound)?;
+        let message =
+            db::message::update_content(&self.pool, message_id, channel_id, &input.content)
+                .await?
+                // `require_own_message` just confirmed this row exists and is ours —
+                // `None` here would mean it vanished in the narrow window between
+                // that check and this statement (M0 concurrency scale, same
+                // residual-race tradeoff as `join_via_invite`'s membership check).
+                .ok_or(DomainError::MessageNotFound)?;
 
         Ok(message.into())
     }
@@ -2089,9 +2114,13 @@ impl DomainService {
             self.require_membership(account_id, server_id).await?;
         }
 
-        let updated =
-            db::channel::update_nickname(&self.pool, server_id, target_account_id, nickname.as_deref())
-                .await?;
+        let updated = db::channel::update_nickname(
+            &self.pool,
+            server_id,
+            target_account_id,
+            nickname.as_deref(),
+        )
+        .await?;
         if !updated {
             return Err(DomainError::AccountNotFound);
         }
@@ -2293,7 +2322,10 @@ impl DomainService {
     /// `db::channel::server_member_account_ids` a server channel's
     /// `authorized_account_ids` already uses; exposed directly here because
     /// role/member events are server-scoped, not channel-scoped.
-    pub async fn server_member_account_ids(&self, server_id: Uuid) -> Result<Vec<Uuid>, DomainError> {
+    pub async fn server_member_account_ids(
+        &self,
+        server_id: Uuid,
+    ) -> Result<Vec<Uuid>, DomainError> {
         Ok(db::channel::server_member_account_ids(&self.pool, server_id).await?)
     }
 
@@ -2315,7 +2347,11 @@ impl DomainService {
     ///    membership and `channel.restricted` with `channel_permissions::VIEW_CHANNEL`).
     /// 2. Channel is a voice channel (`channel.kind == "voice"`).
     /// 3. Caller is not timed out (`!is_member_timed_out`).
-    pub async fn can_join_voice(&self, account_id: Uuid, channel_id: Uuid) -> Result<bool, DomainError> {
+    pub async fn can_join_voice(
+        &self,
+        account_id: Uuid,
+        channel_id: Uuid,
+    ) -> Result<bool, DomainError> {
         let channel = match self.require_channel_access(account_id, channel_id).await {
             Ok(channel) => channel,
             Err(DomainError::ChannelNotFound) => return Ok(false),
@@ -2388,7 +2424,8 @@ impl DomainService {
         &self,
         account_id: Uuid,
     ) -> Result<Vec<Uuid>, DomainError> {
-        let observers = db::channel::observer_account_ids_for_account(&self.pool, account_id).await?;
+        let observers =
+            db::channel::observer_account_ids_for_account(&self.pool, account_id).await?;
         let blockers: HashSet<Uuid> = db::block::blockers_of(&self.pool, account_id)
             .await?
             .into_iter()
@@ -2612,7 +2649,10 @@ impl DomainService {
         .await?)
     }
 
-    async fn lookup_channel(&self, channel_id: Uuid) -> Result<db::channel::ChannelAccessRow, DomainError> {
+    async fn lookup_channel(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<db::channel::ChannelAccessRow, DomainError> {
         db::channel::find_access_by_id(&self.pool, channel_id)
             .await?
             .ok_or(DomainError::ChannelNotFound)
@@ -2708,7 +2748,10 @@ impl DomainService {
         };
         tx.commit().await?;
 
-        match self.build_and_upload_export(storage, job.server_id, job.id).await {
+        match self
+            .build_and_upload_export(storage, job.server_id, job.id)
+            .await
+        {
             Ok((storage_key, download_url)) => {
                 db::export::mark_done(&self.pool, job.id, &storage_key, &download_url).await?;
             }
@@ -2773,7 +2816,9 @@ impl DomainService {
 
         let mut channels_json = Vec::new();
         for channel in channels.iter().filter(|c| c.kind != "thread") {
-            let channel_messages = messages_by_channel.get(&channel.id).unwrap_or(&empty_messages);
+            let channel_messages = messages_by_channel
+                .get(&channel.id)
+                .unwrap_or(&empty_messages);
             let channel_threads = threads_by_parent.get(&channel.id).unwrap_or(&empty_threads);
 
             let threads_json: Vec<_> = channel_threads

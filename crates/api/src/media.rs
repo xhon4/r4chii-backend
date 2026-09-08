@@ -174,7 +174,10 @@ pub async fn get_media(
     Path(key): Path<String>,
 ) -> Result<Response, ApiError> {
     // `..` in a key would resolve outside the prefix the uploader was given.
-    if key.split('/').any(|segment| segment == ".." || segment.is_empty()) {
+    if key
+        .split('/')
+        .any(|segment| segment == ".." || segment.is_empty())
+    {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_media_key",

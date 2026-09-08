@@ -89,11 +89,9 @@ impl From<auth::AuthError> for ApiError {
             auth::AuthError::AccountNotFound => {
                 ApiError::new(StatusCode::NOT_FOUND, "account_not_found", err.to_string())
             }
-            auth::AuthError::Unauthenticated => ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "unauthenticated",
-                err.to_string(),
-            ),
+            auth::AuthError::Unauthenticated => {
+                ApiError::new(StatusCode::UNAUTHORIZED, "unauthenticated", err.to_string())
+            }
             // One shape for wrong, expired, exhausted, and "no such pending
             // registration". Splitting them would tell a guesser which
             // addresses are mid-signup and whether an attempt was close.
@@ -169,11 +167,9 @@ impl From<domain::DomainError> for ApiError {
             domain::DomainError::MessageNotFound => {
                 ApiError::new(StatusCode::NOT_FOUND, "message_not_found", err.to_string())
             }
-            domain::DomainError::NotMessageAuthor => ApiError::new(
-                StatusCode::FORBIDDEN,
-                "not_message_author",
-                err.to_string(),
-            ),
+            domain::DomainError::NotMessageAuthor => {
+                ApiError::new(StatusCode::FORBIDDEN, "not_message_author", err.to_string())
+            }
             // Caller-supplied dm/group-dm participant id that doesn't exist —
             // safe to report plainly, unlike the non-leaking 404s above —
             // that rule is about the caller's OWN access to a resource, not
@@ -222,30 +218,40 @@ impl From<domain::DomainError> for ApiError {
                 "cannot_modify_default_role",
                 err.to_string(),
             ),
-            domain::DomainError::CannotActOnOwner => {
-                ApiError::new(StatusCode::FORBIDDEN, "cannot_act_on_owner", err.to_string())
-            }
-            domain::DomainError::CannotActOnSelf => {
-                ApiError::new(StatusCode::BAD_REQUEST, "cannot_act_on_self", err.to_string())
-            }
+            domain::DomainError::CannotActOnOwner => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "cannot_act_on_owner",
+                err.to_string(),
+            ),
+            domain::DomainError::CannotActOnSelf => ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "cannot_act_on_self",
+                err.to_string(),
+            ),
             domain::DomainError::RoleLimitReached => {
                 ApiError::new(StatusCode::CONFLICT, "role_limit_reached", err.to_string())
             }
-            domain::DomainError::ChannelLimitReached => {
-                ApiError::new(StatusCode::CONFLICT, "channel_limit_reached", err.to_string())
-            }
+            domain::DomainError::ChannelLimitReached => ApiError::new(
+                StatusCode::CONFLICT,
+                "channel_limit_reached",
+                err.to_string(),
+            ),
             domain::DomainError::AlreadyBanned => {
                 ApiError::new(StatusCode::CONFLICT, "already_banned", err.to_string())
             }
             domain::DomainError::Banned => {
                 ApiError::new(StatusCode::FORBIDDEN, "banned_from_server", err.to_string())
             }
-            domain::DomainError::OwnerCannotLeave => {
-                ApiError::new(StatusCode::BAD_REQUEST, "owner_cannot_leave", err.to_string())
-            }
-            domain::DomainError::ExportJobNotFound => {
-                ApiError::new(StatusCode::NOT_FOUND, "export_job_not_found", err.to_string())
-            }
+            domain::DomainError::OwnerCannotLeave => ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "owner_cannot_leave",
+                err.to_string(),
+            ),
+            domain::DomainError::ExportJobNotFound => ApiError::new(
+                StatusCode::NOT_FOUND,
+                "export_job_not_found",
+                err.to_string(),
+            ),
             // Only ever produced inside the worker
             // (`process_next_export_job`), which writes it to
             // `export_job.error` rather than returning an HTTP response —
@@ -261,9 +267,11 @@ impl From<domain::DomainError> for ApiError {
             domain::DomainError::MemberTimedOut => {
                 ApiError::new(StatusCode::FORBIDDEN, "member_timed_out", err.to_string())
             }
-            domain::DomainError::MentionNotAllowed => {
-                ApiError::new(StatusCode::FORBIDDEN, "mention_not_allowed", err.to_string())
-            }
+            domain::DomainError::MentionNotAllowed => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "mention_not_allowed",
+                err.to_string(),
+            ),
             domain::DomainError::Database(db_err) => {
                 // Never leak the DB error string in the response body — log
                 // it server-side instead.
@@ -283,7 +291,11 @@ impl From<domain::DomainError> for ApiError {
 /// crate rather than auth's `Validation` variant.
 impl From<JsonRejection> for ApiError {
     fn from(rejection: JsonRejection) -> Self {
-        ApiError::new(StatusCode::BAD_REQUEST, "invalid_request_body", rejection.body_text())
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_body",
+            rejection.body_text(),
+        )
     }
 }
 
@@ -291,7 +303,11 @@ impl From<JsonRejection> for ApiError {
 /// same envelope shape and same rationale as `JsonRejection` above.
 impl From<QueryRejection> for ApiError {
     fn from(rejection: QueryRejection) -> Self {
-        ApiError::new(StatusCode::BAD_REQUEST, "invalid_query_string", rejection.body_text())
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_query_string",
+            rejection.body_text(),
+        )
     }
 }
 
@@ -364,7 +380,10 @@ mod tests {
 
         assert_eq!(api_err.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(api_err.code(), "internal_error");
-        assert_ne!(api_err.message, message, "must not leak the raw DB error text");
+        assert_ne!(
+            api_err.message, message,
+            "must not leak the raw DB error text"
+        );
     }
 
     #[test]
@@ -558,6 +577,9 @@ mod tests {
 
         assert_eq!(api_err.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(api_err.code(), "internal_error");
-        assert_ne!(api_err.message, message, "must not leak the raw DB error text");
+        assert_ne!(
+            api_err.message, message,
+            "must not leak the raw DB error text"
+        );
     }
 }

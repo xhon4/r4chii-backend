@@ -61,7 +61,9 @@ struct NotFoundTemplate;
 /// split has nothing to switch on today — deferred until a
 /// delete-thread action exists to actually produce that first case.
 fn not_found() -> Response {
-    let body = NotFoundTemplate.render().unwrap_or_else(|_| "Not found".to_string());
+    let body = NotFoundTemplate
+        .render()
+        .unwrap_or_else(|_| "Not found".to_string());
     (StatusCode::NOT_FOUND, Html(body)).into_response()
 }
 
@@ -79,11 +81,14 @@ async fn thread_page(
         return not_found();
     };
 
-    let Ok((thread, messages)) = state.domain.get_public_thread(thread_id, query.after).await else {
+    let Ok((thread, messages)) = state.domain.get_public_thread(thread_id, query.after).await
+    else {
         return not_found();
     };
 
-    let title = thread.title.unwrap_or_else(|| "Untitled thread".to_string());
+    let title = thread
+        .title
+        .unwrap_or_else(|| "Untitled thread".to_string());
     let slug = thread.slug.unwrap_or_default();
     let next_cursor = messages.last().map(|m| m.id.to_string());
 

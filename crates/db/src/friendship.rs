@@ -50,10 +50,7 @@ pub async fn insert_pending(
     .await
 }
 
-pub async fn accept(
-    executor: impl PgExecutor<'_>,
-    id: Uuid,
-) -> Result<FriendshipRow, sqlx::Error> {
+pub async fn accept(executor: impl PgExecutor<'_>, id: Uuid) -> Result<FriendshipRow, sqlx::Error> {
     sqlx::query_as::<_, FriendshipRow>(
         "UPDATE friendship SET status = 'accepted' WHERE id = $1 \
          RETURNING id, account_low, account_high, status, requested_by, created_at",

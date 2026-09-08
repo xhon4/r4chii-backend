@@ -133,10 +133,7 @@ impl Hub {
     ///
     /// Resolves the whole set under one read lock rather than one lock per
     /// account, and returns an entry for every id asked about.
-    pub async fn presence_snapshot(
-        &self,
-        account_ids: &[Uuid],
-    ) -> HashMap<Uuid, PresenceStatus> {
+    pub async fn presence_snapshot(&self, account_ids: &[Uuid]) -> HashMap<Uuid, PresenceStatus> {
         let connections = self.inner.connections.read().await;
         account_ids
             .iter()
@@ -220,7 +217,11 @@ impl Hub {
         server_id: Uuid,
         event: ServerEvent,
     ) -> Result<(), RealtimeError> {
-        let account_ids = self.inner.domain.server_member_account_ids(server_id).await?;
+        let account_ids = self
+            .inner
+            .domain
+            .server_member_account_ids(server_id)
+            .await?;
         self.send_to(&account_ids, &event).await;
         Ok(())
     }
@@ -384,7 +385,11 @@ impl Hub {
         let peers = {
             let mut voice = self.inner.voice.write().await;
             let room = voice.entry(channel_id).or_default();
-            let peers: Vec<Uuid> = room.keys().copied().filter(|id| *id != account_id).collect();
+            let peers: Vec<Uuid> = room
+                .keys()
+                .copied()
+                .filter(|id| *id != account_id)
+                .collect();
             room.insert(account_id, handle);
             peers
         };
@@ -596,7 +601,8 @@ impl Hub {
             let voice = self.inner.voice.read().await;
             match voice.iter().find_map(|(channel_id, room)| {
                 if room.contains_key(&from_account_id) {
-                    room.get(&to_account_id).map(|handle| (*channel_id, *handle))
+                    room.get(&to_account_id)
+                        .map(|handle| (*channel_id, *handle))
                 } else {
                     None
                 }
@@ -788,7 +794,9 @@ mod tests {
 
         {
             let connections = hub.inner.connections.read().await;
-            let list = connections.get(&account_id).expect("second connection remains");
+            let list = connections
+                .get(&account_id)
+                .expect("second connection remains");
             assert_eq!(list.len(), 1);
             assert_eq!(list[0].handle, handle_b);
         }
@@ -798,7 +806,9 @@ mod tests {
             let connections = hub.inner.connections.read().await;
             connections.get(&account_id).unwrap()[0].sender.clone()
         };
-        sender.send("still alive".to_string()).expect("send succeeds");
+        sender
+            .send("still alive".to_string())
+            .expect("send succeeds");
         let received = tokio::time::timeout(Duration::from_secs(1), rx_b.recv())
             .await
             .expect("does not hang")

@@ -55,9 +55,10 @@ pub(crate) fn error_response(error: GovernorError) -> Response<Body> {
 
     let mut response = Response::new(Body::from(body.to_string()));
     *response.status_mut() = status;
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
     if let Some(extra) = extra_headers {
         response.headers_mut().extend(extra);
     }
@@ -78,7 +79,12 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
-        let bytes = response.into_body().collect().await.expect("body collects").to_bytes();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body collects")
+            .to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
 
         assert_eq!(body["error"]["code"], "rate_limited");
@@ -91,7 +97,12 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-        let bytes = response.into_body().collect().await.expect("body collects").to_bytes();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body collects")
+            .to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
 
         assert_eq!(body["error"]["code"], "internal_error");

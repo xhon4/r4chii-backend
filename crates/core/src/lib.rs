@@ -9,10 +9,7 @@ pub enum ConfigError {
     Missing(&'static str),
 
     #[error("invalid value for {name}: {reason}")]
-    Invalid {
-        name: &'static str,
-        reason: String,
-    },
+    Invalid { name: &'static str, reason: String },
 }
 
 /// Generic SMTP settings. Held as plain strings here because
@@ -66,10 +63,13 @@ impl Config {
         };
 
         let port = match env::var("SMTP_PORT") {
-            Ok(raw) => raw.trim().parse::<u16>().map_err(|err| ConfigError::Invalid {
-                name: "SMTP_PORT",
-                reason: err.to_string(),
-            })?,
+            Ok(raw) => raw
+                .trim()
+                .parse::<u16>()
+                .map_err(|err| ConfigError::Invalid {
+                    name: "SMTP_PORT",
+                    reason: err.to_string(),
+                })?,
             Err(_) => 587,
         };
 
@@ -130,7 +130,10 @@ mod tests {
         let config = Config::from_env().expect("DATABASE_URL is set");
         assert_eq!(config.database_url, "postgres://user:pass@localhost/db");
         assert_eq!(config.bind_addr, "0.0.0.0:8080");
-        assert!(config.smtp.is_none(), "no SMTP_HOST means no mail configured");
+        assert!(
+            config.smtp.is_none(),
+            "no SMTP_HOST means no mail configured"
+        );
 
         // Host set but no from-address: refused at startup rather than
         // failing per-message later.

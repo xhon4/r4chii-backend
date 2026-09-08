@@ -267,10 +267,11 @@ impl AuthService {
         // text just took away.
         let password_hash = hash_password(&input.password)?;
 
-        let email_taken = sqlx::query_as::<_, AccountIdRow>("SELECT id FROM account WHERE email = $1")
-            .bind(&email)
-            .fetch_optional(&self.pool)
-            .await?;
+        let email_taken =
+            sqlx::query_as::<_, AccountIdRow>("SELECT id FROM account WHERE email = $1")
+                .bind(&email)
+                .fetch_optional(&self.pool)
+                .await?;
 
         if email_taken.is_some() {
             return Ok(());
@@ -1082,7 +1083,11 @@ impl AuthService {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
-    pub async fn revoke_session(&self, account_id: Uuid, session_id: Uuid) -> Result<(), AuthError> {
+    pub async fn revoke_session(
+        &self,
+        account_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<(), AuthError> {
         // Scoped to (id AND account_id) in one statement so a revoke can
         // never touch another account's row, and a session that belongs to
         // someone else looks identical to one that doesn't exist.
@@ -1103,10 +1108,12 @@ impl AuthService {
     }
 
     pub async fn revoke_all_sessions(&self, account_id: Uuid) -> Result<(), AuthError> {
-        sqlx::query("UPDATE session SET revoked_at = now() WHERE account_id = $1 AND revoked_at IS NULL")
-            .bind(account_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE session SET revoked_at = now() WHERE account_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(account_id)
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }

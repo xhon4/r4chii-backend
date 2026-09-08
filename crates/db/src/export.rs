@@ -63,7 +63,9 @@ pub async fn find_for_server(
 /// instance's poll loop simply skips rows another instance already locked.
 /// The caller MUST commit or roll back `conn`'s transaction promptly to
 /// release the lock.
-pub async fn claim_next_pending(conn: &mut PgConnection) -> Result<Option<ExportJobRow>, sqlx::Error> {
+pub async fn claim_next_pending(
+    conn: &mut PgConnection,
+) -> Result<Option<ExportJobRow>, sqlx::Error> {
     let job = sqlx::query_as::<_, ExportJobRow>(
         "SELECT id, server_id, requested_by, status, storage_key, download_url, \
                 error, created_at, completed_at \
@@ -105,11 +107,17 @@ pub async fn mark_done(
     .map(|_| ())
 }
 
-pub async fn mark_failed(executor: impl PgExecutor<'_>, id: Uuid, error: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE export_job SET status = 'failed', error = $1, completed_at = now() WHERE id = $2")
-        .bind(error)
-        .bind(id)
-        .execute(executor)
-        .await
-        .map(|_| ())
+pub async fn mark_failed(
+    executor: impl PgExecutor<'_>,
+    id: Uuid,
+    error: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE export_job SET status = 'failed', error = $1, completed_at = now() WHERE id = $2",
+    )
+    .bind(error)
+    .bind(id)
+    .execute(executor)
+    .await
+    .map(|_| ())
 }

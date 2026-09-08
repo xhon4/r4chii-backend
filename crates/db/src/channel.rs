@@ -589,14 +589,13 @@ pub async fn update_nickname(
     account_id: Uuid,
     nickname: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(
-        "UPDATE membership SET nickname = $3 WHERE server_id = $1 AND account_id = $2",
-    )
-    .bind(server_id)
-    .bind(account_id)
-    .bind(nickname)
-    .execute(executor)
-    .await?;
+    let result =
+        sqlx::query("UPDATE membership SET nickname = $3 WHERE server_id = $1 AND account_id = $2")
+            .bind(server_id)
+            .bind(account_id)
+            .bind(nickname)
+            .execute(executor)
+            .await?;
     Ok(result.rows_affected() > 0)
 }
 

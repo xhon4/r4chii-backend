@@ -97,10 +97,7 @@ pub enum ServerEvent {
     #[serde(rename = "message.update")]
     MessageUpdate { message: MessagePayload },
     #[serde(rename = "message.delete")]
-    MessageDelete {
-        channel_id: Uuid,
-        message_id: Uuid,
-    },
+    MessageDelete { channel_id: Uuid, message_id: Uuid },
     #[serde(rename = "presence.update")]
     PresenceUpdate {
         account_id: Uuid,
@@ -206,14 +203,18 @@ pub enum MemberLeaveReason {
 /// M0 client->server frames the gateway understands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientFrame {
-    Identify { token: String },
+    Identify {
+        token: String,
+    },
     Ping,
     /// Enter a voice channel. Carried on the socket rather than over HTTP
     /// because voice membership is scoped to one live connection: it must end
     /// when the socket does, exactly like presence, and an HTTP call has no
     /// connection to be scoped to. An account with two tabs open would leave
     /// the server guessing which one is in the call.
-    VoiceJoin { channel_id: Uuid },
+    VoiceJoin {
+        channel_id: Uuid,
+    },
     VoiceLeave,
     /// Relay `signal` to one other participant in the same voice channel.
     VoiceSignal {
@@ -348,10 +349,7 @@ mod tests {
         assert_eq!(value["data"]["status"], "online");
         // The spec pins `{ account_id, status }` and nothing else — no
         // activity string, no idle/dnd state, no last-seen timestamp.
-        assert_eq!(
-            value["data"].as_object().map(serde_json::Map::len),
-            Some(2)
-        );
+        assert_eq!(value["data"].as_object().map(serde_json::Map::len), Some(2));
     }
 
     #[test]
@@ -393,9 +391,6 @@ mod tests {
 
     #[test]
     fn parse_client_frame_ignores_an_identify_frame_missing_the_token() {
-        assert_eq!(
-            parse_client_frame(r#"{"type":"identify","data":{}}"#),
-            None
-        );
+        assert_eq!(parse_client_frame(r#"{"type":"identify","data":{}}"#), None);
     }
 }

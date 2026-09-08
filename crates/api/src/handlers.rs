@@ -16,22 +16,20 @@ use uuid::Uuid;
 use crate::{
     dto::{
         AccountResponse, BanListResponse, BanResponse, BlockListResponse, BlockResponse,
-        BulkProfilesRequest,
-        ChannelListResponse, ChannelResponse, ChannelRolePermissionListResponse,
-        ChannelRolePermissionResponse, CreateBanRequest, CreateBlockRequest,
-        CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, CreateRoleRequest,
-        CreateServerRequest, CreateThreadRequest, EditMessageRequest, ExportJobResponse,
-        FriendshipListResponse, FriendshipResponse,
-        LoginRequest, LoginResponse, MemberRolesResponse, MessageListQuery, MessageListResponse,
-        MessageResponse, MessageSearchQuery, ProfileQuery, ProfileResponse,
-        ProfileSummaryListResponse, ProfileSummaryResponse, RegisterRequest,
-        ReorderRolesRequest,
-        ResendCodeRequest, RoleListResponse, RoleResponse, SendFriendRequestRequest,
-        SendMessageRequest, ServerListResponse, ServerMemberListResponse, ServerMemberResponse,
-        ServerResponse, SessionListResponse, SetChannelRolePermissionRequest,
-        SetMemberRolesRequest, TimeoutRequest, UpdateAccountRequest,
-        UpdateChannelRestrictedRequest, UpdateChannelVisibilityRequest, UpdateNicknameRequest,
-        UpdateRoleRequest, UpdateServerVisibilityRequest, VerifyRegistrationRequest,
+        BulkProfilesRequest, ChannelListResponse, ChannelResponse,
+        ChannelRolePermissionListResponse, ChannelRolePermissionResponse, CreateBanRequest,
+        CreateBlockRequest, CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest,
+        CreateRoleRequest, CreateServerRequest, CreateThreadRequest, EditMessageRequest,
+        ExportJobResponse, FriendshipListResponse, FriendshipResponse, LoginRequest, LoginResponse,
+        MemberRolesResponse, MessageListQuery, MessageListResponse, MessageResponse,
+        MessageSearchQuery, ProfileQuery, ProfileResponse, ProfileSummaryListResponse,
+        ProfileSummaryResponse, RegisterRequest, ReorderRolesRequest, ResendCodeRequest,
+        RoleListResponse, RoleResponse, SendFriendRequestRequest, SendMessageRequest,
+        ServerListResponse, ServerMemberListResponse, ServerMemberResponse, ServerResponse,
+        SessionListResponse, SetChannelRolePermissionRequest, SetMemberRolesRequest,
+        TimeoutRequest, UpdateAccountRequest, UpdateChannelRestrictedRequest,
+        UpdateChannelVisibilityRequest, UpdateNicknameRequest, UpdateRoleRequest,
+        UpdateServerVisibilityRequest, VerifyRegistrationRequest,
     },
     error::ApiError,
     extract::{AuthenticatedUser, SESSION_COOKIE_NAME},
@@ -154,7 +152,9 @@ pub async fn get_account_by_username(
         .get_profile_context_by_username(context.account_id, &username, query.server_id)
         .await?;
 
-    Ok(Json(build_profile_response(&state, ctx, query.server_id).await))
+    Ok(Json(
+        build_profile_response(&state, ctx, query.server_id).await,
+    ))
 }
 
 /// Applies the visibility decision and resolves presence for one profile.
@@ -429,7 +429,13 @@ pub async fn set_channel_role_permission(
     let Json(body) = body?;
     state
         .domain
-        .set_channel_role_permission(context.account_id, server_id, channel_id, role_id, body.permissions)
+        .set_channel_role_permission(
+            context.account_id,
+            server_id,
+            channel_id,
+            role_id,
+            body.permissions,
+        )
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -447,7 +453,10 @@ pub async fn list_channel_role_permissions(
     Ok(Json(ChannelRolePermissionListResponse {
         items: grants
             .into_iter()
-            .map(|(role_id, permissions)| ChannelRolePermissionResponse { role_id, permissions })
+            .map(|(role_id, permissions)| ChannelRolePermissionResponse {
+                role_id,
+                permissions,
+            })
             .collect(),
     }))
 }
@@ -539,7 +548,10 @@ pub async fn create_dm(
     body: Result<Json<CreateDmRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ChannelResponse>), ApiError> {
     let Json(body) = body?;
-    let (channel, created) = state.domain.create_dm(context.account_id, body.account_id).await?;
+    let (channel, created) = state
+        .domain
+        .create_dm(context.account_id, body.account_id)
+        .await?;
     let status = if created {
         StatusCode::CREATED
     } else {
@@ -828,7 +840,11 @@ pub async fn pin_message(
         .pin_message(context.account_id, channel_id, message_id)
         .await?;
 
-    if let Err(err) = state.realtime.publish_message_pin_update(channel_id, &message).await {
+    if let Err(err) = state
+        .realtime
+        .publish_message_pin_update(channel_id, &message)
+        .await
+    {
         tracing::warn!(error = %err, "failed to publish message.pin_update event");
     }
 
@@ -845,7 +861,11 @@ pub async fn unpin_message(
         .unpin_message(context.account_id, channel_id, message_id)
         .await?;
 
-    if let Err(err) = state.realtime.publish_message_pin_update(channel_id, &message).await {
+    if let Err(err) = state
+        .realtime
+        .publish_message_pin_update(channel_id, &message)
+        .await
+    {
         tracing::warn!(error = %err, "failed to publish message.pin_update event");
     }
 
@@ -894,7 +914,10 @@ pub async fn list_roles(
     AuthenticatedUser(context): AuthenticatedUser,
     Path(server_id): Path<Uuid>,
 ) -> Result<Json<RoleListResponse>, ApiError> {
-    let roles = state.domain.list_roles(context.account_id, server_id).await?;
+    let roles = state
+        .domain
+        .list_roles(context.account_id, server_id)
+        .await?;
 
     Ok(Json(RoleListResponse {
         items: roles.into_iter().map(Into::into).collect(),
@@ -1003,7 +1026,12 @@ pub async fn kick_member(
 
     state
         .realtime
-        .announce_member_leave(&recipients, server_id, account_id, realtime::MemberLeaveReason::Kicked)
+        .announce_member_leave(
+            &recipients,
+            server_id,
+            account_id,
+            realtime::MemberLeaveReason::Kicked,
+        )
         .await;
 
     Ok(StatusCode::NO_CONTENT)
@@ -1120,7 +1148,12 @@ pub async fn update_member_nickname(
     let Json(body) = body?;
     state
         .domain
-        .update_member_nickname(context.account_id, server_id, account_id, body.nickname.clone())
+        .update_member_nickname(
+            context.account_id,
+            server_id,
+            account_id,
+            body.nickname.clone(),
+        )
         .await?;
 
     if let Err(err) = state
@@ -1183,12 +1216,12 @@ pub async fn delete_server(
 ) -> Result<StatusCode, ApiError> {
     // Resolved BEFORE the delete: afterward, every `membership` row this
     // would read is already gone.
-    let recipients = state
-        .domain
-        .server_member_account_ids(server_id)
-        .await?;
+    let recipients = state.domain.server_member_account_ids(server_id).await?;
 
-    state.domain.delete_server(context.account_id, server_id).await?;
+    state
+        .domain
+        .delete_server(context.account_id, server_id)
+        .await?;
 
     state
         .realtime
