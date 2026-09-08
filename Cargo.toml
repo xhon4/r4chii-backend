@@ -17,6 +17,9 @@ members = [
 edition = "2021"
 publish = false
 
+[profile.dev.package.argon2]
+opt-level = 3
+
 [profile.test]
 debug = 1
 incremental = false
