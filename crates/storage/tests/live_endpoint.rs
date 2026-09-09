@@ -73,6 +73,14 @@ async fn an_object_round_trips_and_stays_private() {
     );
     assert_eq!(
         signed
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/plain"),
+        "the uploaded content type must be preserved"
+    );
+    assert_eq!(
+        signed
             .bytes()
             .await
             .expect("a body must come back")

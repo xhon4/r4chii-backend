@@ -6,19 +6,28 @@
 //! storage backend swappable: Garage today, an S3 bucket somewhere else
 //! tomorrow, without a line changing above this boundary.
 
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
-use aws_credential_types::Credentials;
-use aws_sdk_s3::config::{BehaviorVersion, Region};
-use aws_sdk_s3::presigning::PresigningConfig;
-use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::Client;
+use reqwest::{header::CONTENT_TYPE, redirect::Policy, Client, Url};
+use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use thiserror::Error;
+
+const REQUEST_EXPIRY: Duration = Duration::from_secs(15 * 60);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MIN_PRESIGN_DURATION: Duration = Duration::from_secs(1);
+const MAX_PRESIGN_DURATION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("missing required environment variable: {0}")]
     MissingConfig(&'static str),
+    #[error("invalid storage endpoint configuration")]
+    InvalidEndpoint,
+    #[error("invalid storage object key")]
+    InvalidKey,
+    #[error("storage HTTP client configuration is unavailable")]
+    HttpClientUnavailable,
     #[error("failed to store object: {0}")]
     Put(String),
     #[error("failed to delete object: {0}")]
@@ -29,7 +38,7 @@ pub enum StorageError {
     InvalidDuration(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StorageConfig {
     /// How the *backend* reaches storage — over the compose network in dev.
     pub endpoint: String,
@@ -44,6 +53,19 @@ pub struct StorageConfig {
     pub secret_access_key: String,
 }
 
+impl fmt::Debug for StorageConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StorageConfig")
+            .field("endpoint", &"<redacted>")
+            .field("public_endpoint", &"<redacted>")
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("access_key_id", &"<redacted>")
+            .field("secret_access_key", &"<redacted>")
+            .finish()
+    }
+}
+
 impl StorageConfig {
     pub fn from_env() -> Result<Self, StorageError> {
         fn required(key: &'static str) -> Result<String, StorageError> {
@@ -56,8 +78,6 @@ impl StorageConfig {
         Ok(Self {
             endpoint: required("S3_ENDPOINT")?,
             public_endpoint: required("S3_PUBLIC_ENDPOINT")?,
-            // Garage has no real regions, but SigV4 signs whichever string is
-            // used, so both sides must agree on it.
             region: std::env::var("S3_REGION").unwrap_or_else(|_| "garage".to_string()),
             bucket: required("S3_BUCKET")?,
             access_key_id: required("S3_ACCESS_KEY_ID")?,
@@ -68,50 +88,104 @@ impl StorageConfig {
 
 /// Reads and writes objects.
 ///
-/// Holds two clients on purpose. `write` talks to the internal endpoint and
+/// Holds two buckets on purpose. `write` talks to the internal endpoint and
 /// actually moves bytes; `sign` never makes a request at all — it exists only
-/// so presigned URLs carry the public host in their signature. One client
+/// so presigned URLs carry the public host in their signature. One bucket
 /// cannot do both, because the endpoint is baked into what gets signed.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StorageService {
-    write: Client,
-    sign: Client,
-    bucket: String,
+    write: Option<Bucket>,
+    sign: Option<Bucket>,
+    credentials: Credentials,
+    http: Option<Client>,
 }
 
-fn client_for(config: &StorageConfig, endpoint: &str) -> Client {
-    let credentials = Credentials::new(
-        config.access_key_id.clone(),
-        config.secret_access_key.clone(),
-        None,
-        None,
-        "r4chii-static",
-    );
+impl fmt::Debug for StorageService {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StorageService")
+            .field("write_endpoint_configured", &self.write.is_some())
+            .field("sign_endpoint_configured", &self.sign.is_some())
+            .finish_non_exhaustive()
+    }
+}
 
-    let s3_config = aws_sdk_s3::Config::builder()
-        .behavior_version(BehaviorVersion::latest())
-        .region(Region::new(config.region.clone()))
-        .endpoint_url(endpoint)
-        .credentials_provider(credentials)
-        // Garage serves path-style out of the box. Virtual-host style would
-        // need a wildcard DNS entry per bucket, which nothing here has.
-        .force_path_style(true)
-        .build();
+fn bucket_for(config: &StorageConfig, endpoint: &str) -> Option<Bucket> {
+    let endpoint = endpoint.parse::<Url>().ok()?;
+    Bucket::new(
+        endpoint,
+        UrlStyle::Path,
+        config.bucket.clone(),
+        config.region.clone(),
+    )
+    .ok()
+}
 
-    Client::from_conf(s3_config)
+fn validate_presign_duration(expires_in: Duration) -> Result<(), StorageError> {
+    if expires_in < MIN_PRESIGN_DURATION || expires_in > MAX_PRESIGN_DURATION {
+        return Err(StorageError::InvalidDuration(
+            "duration must be between 1 second and 7 days".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl StorageService {
     pub fn new(config: &StorageConfig) -> Self {
         Self {
-            write: client_for(config, &config.endpoint),
-            sign: client_for(config, &config.public_endpoint),
-            bucket: config.bucket.clone(),
+            write: bucket_for(config, &config.endpoint),
+            sign: bucket_for(config, &config.public_endpoint),
+            credentials: Credentials::new(
+                config.access_key_id.clone(),
+                config.secret_access_key.clone(),
+            ),
+            http: Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
+                .redirect(Policy::none())
+                .build()
+                .ok(),
         }
     }
 
     pub fn from_env() -> Result<Self, StorageError> {
         Ok(Self::new(&StorageConfig::from_env()?))
+    }
+
+    fn write_bucket(&self) -> Result<&Bucket, StorageError> {
+        self.write.as_ref().ok_or(StorageError::InvalidEndpoint)
+    }
+
+    fn http_client(&self) -> Result<&Client, StorageError> {
+        self.http
+            .as_ref()
+            .ok_or(StorageError::HttpClientUnavailable)
+    }
+
+    fn sign_bucket(&self) -> Result<&Bucket, StorageError> {
+        self.sign.as_ref().ok_or_else(|| {
+            StorageError::Presign("invalid storage endpoint configuration".to_string())
+        })
+    }
+
+    fn signed_put_url(&self, key: &str, content_type: &str) -> Result<Url, StorageError> {
+        let bucket = self.write_bucket()?;
+        bucket
+            .object_url(key)
+            .map_err(|_| StorageError::InvalidKey)?;
+
+        let mut action = bucket.put_object(Some(&self.credentials), key);
+        action.headers_mut().insert("content-type", content_type);
+        Ok(action.sign(REQUEST_EXPIRY))
+    }
+
+    fn signed_delete_url(&self, key: &str) -> Result<Url, StorageError> {
+        let bucket = self.write_bucket()?;
+        bucket
+            .object_url(key)
+            .map_err(|_| StorageError::InvalidKey)?;
+        Ok(bucket
+            .delete_object(Some(&self.credentials), key)
+            .sign(REQUEST_EXPIRY))
     }
 
     /// Stores `bytes` at `key`, replacing whatever was there.
@@ -126,27 +200,41 @@ impl StorageService {
         bytes: Vec<u8>,
         content_type: &str,
     ) -> Result<(), StorageError> {
-        self.write
-            .put_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .content_type(content_type)
-            .body(ByteStream::from(bytes))
+        let response = self
+            .http_client()?
+            .put(self.signed_put_url(key, content_type)?)
+            .header(CONTENT_TYPE, content_type)
+            .body(bytes)
             .send()
             .await
-            .map_err(|e| StorageError::Put(format!("{e:?}")))?;
-        Ok(())
+            .map_err(|_| StorageError::Put("request failed".to_string()))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(StorageError::Put(format!(
+                "request returned HTTP {}",
+                response.status()
+            )))
+        }
     }
 
     pub async fn delete_object(&self, key: &str) -> Result<(), StorageError> {
-        self.write
-            .delete_object()
-            .bucket(&self.bucket)
-            .key(key)
+        let response = self
+            .http_client()?
+            .delete(self.signed_delete_url(key)?)
             .send()
             .await
-            .map_err(|e| StorageError::Delete(format!("{e:?}")))?;
-        Ok(())
+            .map_err(|_| StorageError::Delete("request failed".to_string()))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(StorageError::Delete(format!(
+                "request returned HTTP {}",
+                response.status()
+            )))
+        }
     }
 
     /// A time-limited URL a browser can fetch directly.
@@ -154,25 +242,20 @@ impl StorageService {
     /// The bucket is private, so this is the only way to read an object —
     /// an unsigned request gets a 403. Signing is pure computation: no
     /// request leaves the process, and the key does not have to exist yet.
-    /// It is `async` regardless because the SDK's credential provider is,
-    /// and every caller here is already in async context.
     pub async fn presigned_get(
         &self,
         key: &str,
         expires_in: Duration,
     ) -> Result<String, StorageError> {
-        let presigning = PresigningConfig::expires_in(expires_in)
-            .map_err(|e| StorageError::InvalidDuration(e.to_string()))?;
+        validate_presign_duration(expires_in)?;
+        let bucket = self.sign_bucket()?;
+        bucket
+            .object_url(key)
+            .map_err(|_| StorageError::InvalidKey)?;
 
-        let request = self
-            .sign
-            .get_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .presigned(presigning)
-            .await
-            .map_err(|e| StorageError::Presign(format!("{e:?}")))?;
-
-        Ok(request.uri().to_string())
+        Ok(bucket
+            .get_object(Some(&self.credentials), key)
+            .sign(expires_in)
+            .to_string())
     }
 }

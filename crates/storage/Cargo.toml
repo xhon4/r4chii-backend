@@ -6,20 +6,10 @@ publish.workspace = true
 
 [dependencies]
 app-core = { version = "0.1.0", path = "../core" }
-# The official SDK, not minio-rs. Both speak S3 and Garage answers either, but
-# minio-rs is pre-1.0 and comes from the vendor that just archived its
-# open-source server. Its one advantage — presigned POST, which aws-sdk-rust
-# still lacks (awslabs/aws-sdk-rust#863) — buys nothing here: avatars are
-# uploaded BY the backend, so this crate needs an authenticated PUT and a
-# presigned GET, and both are first-class here.
-aws-sdk-s3 = "1.115.0"
-aws-credential-types = "1.2.6"
-aws-smithy-types = "1.4.0"
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
+rusty-s3 = "0.10.2"
 thiserror = "2.0.20"
 
 [dev-dependencies]
 app-core = { version = "0.1.0", path = "../core" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
-# Fetches the presigned url the round-trip test produces. A presigned url that
-# is never fetched proves only that a string was built.
-reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
