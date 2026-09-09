@@ -351,6 +351,103 @@ pub async fn soft_delete(
     Ok(result.rows_affected() == 1)
 }
 
+/// Renames a `text`/`voice` channel — updates `name`, never `title`/`slug`.
+pub async fn update_channel_name(
+    executor: impl PgExecutor<'_>,
+    channel_id: Uuid,
+    server_id: Uuid,
+    name: &str,
+) -> Result<Option<ChannelRow>, sqlx::Error> {
+    sqlx::query_as::<_, ChannelRow>(
+        "UPDATE channel SET name = $1 \
+         WHERE id = $2 AND server_id = $3 AND deleted_at IS NULL \
+         AND kind IN ('text', 'voice') \
+         RETURNING id, server_id, kind, name, created_at, visibility, \
+                   parent_channel_id, root_message_id, title, slug, restricted",
+    )
+    .bind(name)
+    .bind(channel_id)
+    .bind(server_id)
+    .fetch_optional(executor)
+    .await
+}
+
+/// Retitles a `thread` — updates `title`, never `name`/`slug`/`kind`.
+pub async fn update_thread_title(
+    executor: impl PgExecutor<'_>,
+    channel_id: Uuid,
+    server_id: Uuid,
+    title: &str,
+) -> Result<Option<ChannelRow>, sqlx::Error> {
+    sqlx::query_as::<_, ChannelRow>(
+        "UPDATE channel SET title = $1 \
+         WHERE id = $2 AND server_id = $3 AND deleted_at IS NULL \
+         AND kind = 'thread' \
+         RETURNING id, server_id, kind, name, created_at, visibility, \
+                   parent_channel_id, root_message_id, title, slug, restricted",
+    )
+    .bind(title)
+    .bind(channel_id)
+    .bind(server_id)
+    .fetch_optional(executor)
+    .await
+}
+
+/// Every live, non-thread channel id in a server — the canonical set for
+/// reorder validation. Threads, soft-deleted rows, and rows under a deleted
+/// parent never appear here; `list_by_server` already excludes the same set.
+pub async fn live_non_thread_channel_ids(
+    executor: impl PgExecutor<'_>,
+    server_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM channel \
+         WHERE server_id = $1 AND kind IN ('text', 'voice') AND deleted_at IS NULL \
+         ORDER BY position ASC NULLS LAST, created_at ASC",
+    )
+    .bind(server_id)
+    .fetch_all(executor)
+    .await
+}
+
+/// Sets `position` for one live channel — reorder's bulk write executes one
+/// of these per id inside a single transaction.
+pub async fn set_channel_position(
+    executor: impl PgExecutor<'_>,
+    channel_id: Uuid,
+    server_id: Uuid,
+    position: i32,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE channel SET position = $1 \
+         WHERE id = $2 AND server_id = $3 AND deleted_at IS NULL \
+         AND kind IN ('text', 'voice')",
+    )
+    .bind(position)
+    .bind(channel_id)
+    .bind(server_id)
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Every role that holds `bit` on `channel_id` — used to filter channel
+/// realtime recipients to those with `VIEW_CHANNEL` when the channel is
+/// restricted.
+pub async fn grant_role_ids_for_channel(
+    executor: impl PgExecutor<'_>,
+    channel_id: Uuid,
+    bit: i64,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT role_id FROM channel_role_permission WHERE channel_id = $1 AND permissions & $2 != 0",
+    )
+    .bind(channel_id)
+    .bind(bit)
+    .fetch_all(executor)
+    .await
+}
+
 /// One row of the public sitemap: every thread whose EFFECTIVE
 /// visibility (its own override, else its server's) is `public`.
 /// `unlisted` is deliberately excluded — reachable by direct link, invisible

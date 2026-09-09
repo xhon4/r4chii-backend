@@ -70,6 +70,40 @@ impl From<&domain::MessageSummary> for MessagePayload {
     }
 }
 
+/// Wire shape of a channel inside `channel.create`/`channel.update` events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChannelPayload {
+    pub id: Uuid,
+    pub server_id: Option<Uuid>,
+    pub kind: String,
+    pub name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub visibility: Option<String>,
+    pub parent_channel_id: Option<Uuid>,
+    pub root_message_id: Option<Uuid>,
+    pub title: Option<String>,
+    pub slug: Option<String>,
+    pub restricted: bool,
+}
+
+impl From<&domain::ChannelSummary> for ChannelPayload {
+    fn from(channel: &domain::ChannelSummary) -> Self {
+        Self {
+            id: channel.id,
+            server_id: channel.server_id,
+            kind: channel.kind.clone(),
+            name: channel.name.clone(),
+            created_at: channel.created_at,
+            visibility: channel.visibility.clone(),
+            parent_channel_id: channel.parent_channel_id,
+            root_message_id: channel.root_message_id,
+            title: channel.title.clone(),
+            slug: channel.slug.clone(),
+            restricted: channel.restricted,
+        }
+    }
+}
+
 /// Whether an account currently holds at least one live gateway socket.
 /// Exactly the two states the spec pins for `presence.update` — there is
 /// deliberately no idle/away/dnd state and no activity string, because
@@ -204,6 +238,13 @@ pub enum ServerEvent {
         account_id: Uuid,
         nickname: Option<String>,
     },
+    // ---- ADR-0017: channel lifecycle ----
+    #[serde(rename = "channel.create")]
+    ChannelCreate { channel: ChannelPayload },
+    #[serde(rename = "channel.update")]
+    ChannelUpdate { channel: ChannelPayload },
+    #[serde(rename = "channel.delete")]
+    ChannelDelete { server_id: Uuid, channel_id: Uuid },
 }
 
 /// Why a `member.leave` event fired — lets the client render "left" vs "was

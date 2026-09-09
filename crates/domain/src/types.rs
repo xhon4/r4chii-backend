@@ -75,6 +75,21 @@ pub struct ChannelSummary {
     pub restricted: bool,
 }
 
+/// Input to `DomainService::rename_channel` — `name` for `text`/`voice`,
+/// `title` for `thread`. Exactly one must be `Some`.
+#[derive(Debug, Clone)]
+pub struct RenameChannelInput {
+    pub name: Option<String>,
+    pub title: Option<String>,
+}
+
+/// Input to `DomainService::reorder_channels` — the full ordered list of
+/// every live non-thread channel id in the server.
+#[derive(Debug, Clone)]
+pub struct ReorderChannelsInput {
+    pub ordered_channel_ids: Vec<Uuid>,
+}
+
 /// Input to `DomainService::create_thread`.
 #[derive(Debug, Clone)]
 pub struct CreateThreadInput {

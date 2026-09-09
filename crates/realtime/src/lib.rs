@@ -9,7 +9,7 @@ mod hub;
 
 pub use error::RealtimeError;
 pub use event::{
-    parse_client_frame, ClientFrame, DeclaredStatus, MemberLeaveReason, MessagePayload,
-    PresenceStatus, RolePayload, ServerEvent,
+    parse_client_frame, ChannelPayload, ClientFrame, DeclaredStatus, MemberLeaveReason,
+    MessagePayload, PresenceStatus, RolePayload, ServerEvent,
 };
 pub use hub::{ConnectionHandle, Hub};

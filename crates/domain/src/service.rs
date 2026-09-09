@@ -779,6 +779,317 @@ impl DomainService {
         Ok(())
     }
 
+    /// Renames a server channel or retitles a thread. Gated on
+    /// `MANAGE_CHANNELS` (owner/`ADMIN` bypass via `require_permission`) and
+    /// on visibility of the target (`require_channel_access`, non-leaking).
+    /// A `thread`'s `slug` is frozen at creation and never changes.
+    pub async fn rename_channel(
+        &self,
+        account_id: Uuid,
+        server_id: Uuid,
+        channel_id: Uuid,
+        input: crate::types::RenameChannelInput,
+    ) -> Result<ChannelSummary, DomainError> {
+        self.require_permission(account_id, server_id, permissions::MANAGE_CHANNELS)
+            .await?;
+
+        // Confirm the channel belongs to `server_id` and resolve its current
+        // kind/restriction in one lookup — same non-leaking 404 as
+        // `delete_channel` but without an extra `parent_id_for_server` round
+        // trip (that helper returns `None` both for "belongs but parent is
+        // NULL" and for "doesn't belong").
+        let access = self.lookup_channel(channel_id).await?;
+        if access.server_id != Some(server_id) {
+            return Err(DomainError::ChannelNotFound);
+        }
+        // Visibility of the target itself — threads resolve through their parent.
+        self.require_channel_access(account_id, channel_id).await?;
+
+        // Need the current kind to decide which field is legal.
+        let kind = access.kind.clone();
+        if kind == "thread" {
+            let title = match (input.title, input.name) {
+                (Some(title), None) => title,
+                (Some(_), Some(_)) => {
+                    return Err(DomainError::Validation(
+                        "a thread is retitled with `title`, not `name`".to_string(),
+                    ))
+                }
+                (None, Some(_)) => {
+                    return Err(DomainError::Validation(
+                        "a thread is retitled with `title`, not `name`".to_string(),
+                    ))
+                }
+                (None, None) => {
+                    return Err(DomainError::Validation(
+                        "title is required for a thread".to_string(),
+                    ))
+                }
+            };
+            validate_thread_title(&title)?;
+            let updated = db::channel::update_thread_title(&self.pool, channel_id, server_id, &title)
+                .await?
+                .ok_or(DomainError::ChannelNotFound)?;
+            Ok(updated.into())
+        } else if kind == "text" || kind == "voice" {
+            let name = match (input.name, input.title) {
+                (Some(name), None) => name,
+                (Some(_), Some(_)) => {
+                    return Err(DomainError::Validation(
+                        "a text/voice channel is renamed with `name`, not `title`".to_string(),
+                    ))
+                }
+                (None, Some(_)) => {
+                    return Err(DomainError::Validation(
+                        "a text/voice channel is renamed with `name`, not `title`".to_string(),
+                    ))
+                }
+                (None, None) => {
+                    return Err(DomainError::Validation(
+                        "name is required for a text/voice channel".to_string(),
+                    ))
+                }
+            };
+            validate_channel_name(&name)?;
+            let updated = db::channel::update_channel_name(&self.pool, channel_id, server_id, &name)
+                .await?
+                .ok_or(DomainError::ChannelNotFound)?;
+            Ok(updated.into())
+        } else {
+            return Err(DomainError::ChannelNotFound);
+        }
+    }
+
+    /// Reorders every live, non-thread channel in a server in one atomic
+    /// transaction. Gated on `MANAGE_CHANNELS` plus visibility of the complete
+    /// canonical set — a moderator who cannot view a restricted channel cannot
+    /// reorder around it.
+    pub async fn reorder_channels(
+        &self,
+        account_id: Uuid,
+        server_id: Uuid,
+        ordered_channel_ids: Vec<Uuid>,
+    ) -> Result<Vec<ChannelSummary>, DomainError> {
+        let ctx = self
+            .require_permission(account_id, server_id, permissions::MANAGE_CHANNELS)
+            .await?;
+
+        // Full canonical set — live non-thread channels only.
+        let canonical_ids =
+            db::channel::live_non_thread_channel_ids(&self.pool, server_id).await?;
+        let canonical_set: HashSet<Uuid> = canonical_ids.iter().copied().collect();
+        let provided_set: HashSet<Uuid> = ordered_channel_ids.iter().copied().collect();
+
+        // No duplicates.
+        if provided_set.len() != ordered_channel_ids.len() {
+            return Err(DomainError::Validation(
+                "duplicate channel ids in reorder request".to_string(),
+            ));
+        }
+        // Exact set match — rejects missing, foreign, threads, deleted.
+        if provided_set != canonical_set {
+            return Err(DomainError::Validation(
+                "must list every live non-thread channel exactly once".to_string(),
+            ));
+        }
+
+        // Visibility of the complete canonical set — same split
+        // `list_channels` uses for its restricted filtering, but here it is an
+        // authorization gate rather than a filter.
+        let bypass = ctx.is_owner || permissions::has(ctx.permissions, permissions::ADMIN);
+        if !bypass && !canonical_ids.is_empty() {
+            // Fetch raw restricted flags for the canonical ids.
+            let restricted_map: HashMap<Uuid, bool> =
+                db::channel::restricted_flags_for(&self.pool, &canonical_ids)
+                    .await?
+                    .into_iter()
+                    .collect();
+            let restricted_ids: Vec<Uuid> = canonical_ids
+                .iter()
+                .filter(|id| *restricted_map.get(id).unwrap_or(&false))
+                .copied()
+                .collect();
+            if !restricted_ids.is_empty() {
+                let granted =
+                    db::channel::channel_ids_with_role_permission(
+                        &self.pool,
+                        &restricted_ids,
+                        &ctx.role_ids,
+                        channel_permissions::VIEW_CHANNEL,
+                    )
+                    .await?
+                    .into_iter()
+                    .collect::<HashSet<Uuid>>();
+                for rid in &restricted_ids {
+                    if !granted.contains(rid) {
+                        return Err(DomainError::MissingPermission);
+                    }
+                }
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+        for (index, channel_id) in ordered_channel_ids.iter().enumerate() {
+            let updated =
+                db::channel::set_channel_position(&mut *tx, *channel_id, server_id, index as i32)
+                    .await?;
+            if !updated {
+                return Err(DomainError::ChannelNotFound);
+            }
+        }
+        tx.commit().await?;
+
+        let rows = db::channel::list_by_server(&self.pool, server_id).await?;
+        // Filter through the same visibility gate `list_channels` uses for the
+        // response? No — the caller has already proven visibility of the full
+        // set and is `MANAGE_CHANNELS`-authorized, but the response shape must
+        // still honor the canonical ordering. `list_by_server` already returns
+        // in the new `position ASC NULLS LAST, created_at ASC` order.
+        // We return the full list; the handler will further filter it through
+        // `list_channels`'s own visibility if needed. For now return all.
+        let ctx2 = self.member_context(account_id, server_id).await?;
+        let bypass2 = ctx2.is_owner || permissions::has(ctx2.permissions, permissions::ADMIN);
+        if bypass2 {
+            return Ok(rows.into_iter().map(Into::into).collect());
+        }
+        // Reuse the same restricted filtering as `list_channels`.
+        let parent_ids: Vec<Uuid> = {
+            let mut ids: Vec<Uuid> = rows.iter().filter_map(|r| r.parent_channel_id).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let parent_restricted: HashMap<Uuid, bool> = if parent_ids.is_empty() {
+            HashMap::new()
+        } else {
+            db::channel::restricted_flags_for(&self.pool, &parent_ids)
+                .await?
+                .into_iter()
+                .collect()
+        };
+        let resolved: Vec<(db::channel::ChannelRow, bool, Uuid)> = rows
+            .into_iter()
+            .map(|row| {
+                let (eff, gid) = match row.parent_channel_id {
+                    Some(pid) => (*parent_restricted.get(&pid).unwrap_or(&false), pid),
+                    None => (row.restricted, row.id),
+                };
+                (row, eff, gid)
+            })
+            .collect();
+        let restricted_grant_ids: Vec<Uuid> = {
+            let mut ids: Vec<Uuid> = resolved
+                .iter()
+                .filter(|(_, r, _)| *r)
+                .map(|(_, _, gid)| *gid)
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let granted: HashSet<Uuid> = db::channel::channel_ids_with_role_permission(
+            &self.pool,
+            &restricted_grant_ids,
+            &ctx2.role_ids,
+            channel_permissions::VIEW_CHANNEL,
+        )
+        .await?
+        .into_iter()
+        .collect();
+        let visible = resolved
+            .into_iter()
+            .filter(|(_, eff, gid)| !eff || granted.contains(gid))
+            .map(|(row, _, _)| row.into())
+            .collect();
+        Ok(visible)
+    }
+
+    /// Every account that may view `channel_id` — recipients for
+    /// `channel.create`/`channel.update` (and captured pre-delete for
+    /// `channel.delete`). Mirrors `list_channels`'s own visibility logic but
+    /// returns account ids rather than channel rows. When `expected_server_id`
+    /// is `Some`, the channel must belong to that server or `ChannelNotFound`
+    /// is returned (non-leaking path check).
+    pub async fn channel_viewer_account_ids(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<Vec<Uuid>, DomainError> {
+        self.channel_viewer_account_ids_for_server(channel_id, None)
+            .await
+    }
+
+    pub async fn channel_viewer_account_ids_for_server(
+        &self,
+        channel_id: Uuid,
+        expected_server_id: Option<Uuid>,
+    ) -> Result<Vec<Uuid>, DomainError> {
+        let access = self.lookup_channel(channel_id).await?;
+        let server_id = access.server_id.ok_or(DomainError::ChannelNotFound)?;
+        if let Some(expected) = expected_server_id {
+            if server_id != expected {
+                return Err(DomainError::ChannelNotFound);
+            }
+        }
+
+        let all = db::channel::server_member_account_ids(&self.pool, server_id).await?;
+        if !access.restricted {
+            return Ok(all);
+        }
+        let grant_channel_id = access.parent_channel_id.unwrap_or(channel_id);
+
+        // Roles that hold VIEW_CHANNEL on this channel.
+        let grant_role_ids = db::channel::grant_role_ids_for_channel(
+            &self.pool,
+            grant_channel_id,
+            channel_permissions::VIEW_CHANNEL,
+        )
+        .await?;
+
+        let grant_set: HashSet<Uuid> = grant_role_ids.into_iter().collect();
+
+        // Server roles map for permission (ADMIN) check.
+        let all_roles = db::server_role::list_roles(&self.pool, server_id).await?;
+        let role_perms: HashMap<Uuid, i64> =
+            all_roles.iter().map(|r| (r.id, r.permissions)).collect();
+        let default_perm = all_roles
+            .iter()
+            .find(|r| r.is_default)
+            .map(|r| r.permissions)
+            .unwrap_or(0);
+
+        let member_rows = db::server::list_members(&self.pool, server_id).await?;
+        let role_pairs = db::server_role::role_ids_for_server_members(&self.pool, server_id).await?;
+        let mut account_to_roles: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        for (aid, rid) in role_pairs {
+            account_to_roles.entry(aid).or_default().push(rid);
+        }
+        let mut viewers = Vec::new();
+        for row in member_rows {
+            if !all.contains(&row.account_id) {
+                continue;
+            }
+            if row.role == "owner" {
+                viewers.push(row.account_id);
+                continue;
+            }
+            let role_ids = account_to_roles.get(&row.account_id).cloned().unwrap_or_default();
+            let mut perms = default_perm;
+            for rid in &role_ids {
+                if let Some(p) = role_perms.get(rid) {
+                    perms |= *p;
+                }
+            }
+            if permissions::has(perms, permissions::ADMIN) {
+                viewers.push(row.account_id);
+                continue;
+            }
+            if role_ids.iter().any(|rid| grant_set.contains(rid)) {
+                viewers.push(row.account_id);
+            }
+        }
+        Ok(viewers)
+    }
+
     /// Sets (or clears, via `visibility: None`) a channel's visibility
     /// override. Gated on `MANAGE_VISIBILITY`; an override may
     /// never rank BROADER than the server's own visibility — a private

@@ -25,7 +25,7 @@ pub use service::{
 pub use types::{
     BanSummary, BlockSummary, ChannelSummary, CreateChannelInput, CreateGroupDmInput,
     CreateRoleInput, CreateServerInput, CreateThreadInput, EditMessageInput, ExportJobSummary,
-    FriendshipSummary, MessagePagination, MessageSummary, PublicMessageSummary, RoleSummary,
-    SearchInput, SendMessageInput, ServerMemberSummary, ServerSummary, SitemapThread, TimeoutInput,
-    UpdateRoleInput,
+    FriendshipSummary, MessagePagination, MessageSummary, PublicMessageSummary, RenameChannelInput,
+    ReorderChannelsInput, RoleSummary, SearchInput, SendMessageInput, ServerMemberSummary,
+    ServerSummary, SitemapThread, TimeoutInput, UpdateRoleInput,
 };

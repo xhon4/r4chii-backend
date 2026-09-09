@@ -12,7 +12,8 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::error::RealtimeError;
 use crate::event::{
-    DeclaredStatus, MemberLeaveReason, MessagePayload, PresenceStatus, RolePayload, ServerEvent,
+    ChannelPayload, DeclaredStatus, MemberLeaveReason, MessagePayload, PresenceStatus, RolePayload,
+    ServerEvent,
 };
 
 /// Opaque per-connection identity, distinct from `account_id`: an account
@@ -361,6 +362,66 @@ impl Hub {
     pub async fn announce_server_delete(&self, account_ids: &[Uuid], server_id: Uuid) {
         self.send_to(account_ids, &ServerEvent::ServerDelete { server_id })
             .await;
+    }
+
+    // ---- ADR-0017: channel lifecycle ----
+
+    /// Broadcasts `channel.create` to every member that may view the channel.
+    pub async fn publish_channel_create(
+        &self,
+        channel: &domain::ChannelSummary,
+    ) -> Result<(), RealtimeError> {
+        let account_ids = self
+            .inner
+            .domain
+            .channel_viewer_account_ids(channel.id)
+            .await?;
+        self.send_to(
+            &account_ids,
+            &ServerEvent::ChannelCreate {
+                channel: ChannelPayload::from(channel),
+            },
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Broadcasts `channel.update` (rename or reorder) to viewers of the
+    /// affected channel.
+    pub async fn publish_channel_update(
+        &self,
+        channel: &domain::ChannelSummary,
+    ) -> Result<(), RealtimeError> {
+        let account_ids = self
+            .inner
+            .domain
+            .channel_viewer_account_ids(channel.id)
+            .await?;
+        self.send_to(
+            &account_ids,
+            &ServerEvent::ChannelUpdate {
+                channel: ChannelPayload::from(channel),
+            },
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Broadcasts `channel.delete` to viewers captured BEFORE the soft-delete.
+    pub async fn announce_channel_delete(
+        &self,
+        account_ids: &[Uuid],
+        server_id: Uuid,
+        channel_id: Uuid,
+    ) {
+        self.send_to(
+            account_ids,
+            &ServerEvent::ChannelDelete {
+                server_id,
+                channel_id,
+            },
+        )
+        .await;
     }
 
     /// Resolves authorized recipients server-side at publish time (never

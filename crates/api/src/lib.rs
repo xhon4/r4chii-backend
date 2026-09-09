@@ -201,6 +201,14 @@ pub fn router(state: AppState) -> Router {
             get(handlers::list_channels),
         )
         .route(
+            "/api/v1/servers/{id}/channels/positions",
+            patch(handlers::reorder_channels),
+        )
+        .route(
+            "/api/v1/servers/{id}/channels/{channel_id}",
+            patch(handlers::rename_channel),
+        )
+        .route(
             "/api/v1/servers/{id}/channels/{channel_id}",
             delete(handlers::delete_channel),
         )

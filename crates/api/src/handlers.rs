@@ -21,12 +21,13 @@ use crate::{
         CreateThreadRequest, EditMessageRequest, ExportJobResponse, FriendshipResponse,
         ListResponse, LoginRequest, LoginResponse, MemberRolesResponse, MessageListQuery,
         MessageResponse, MessageSearchQuery, PagedResponse, ProfileQuery, ProfileResponse,
-        ProfileSummaryResponse, RegisterRequest, ReorderRolesRequest, ResendCodeRequest,
-        RoleResponse, SendFriendRequestRequest, SendMessageRequest, ServerMemberResponse,
-        ServerResponse, SessionResponse, SetChannelRolePermissionRequest, SetMemberRolesRequest,
-        SetSpacesOrderRequest, TimeoutRequest, UpdateAccountRequest,
-        UpdateChannelRestrictedRequest, UpdateChannelVisibilityRequest, UpdateNicknameRequest,
-        UpdateRoleRequest, UpdateServerVisibilityRequest, VerifyRegistrationRequest,
+        ProfileSummaryResponse, RegisterRequest, RenameChannelRequest, ReorderChannelsRequest,
+        ReorderRolesRequest, ResendCodeRequest, RoleResponse, SendFriendRequestRequest,
+        SendMessageRequest, ServerMemberResponse, ServerResponse, SessionResponse,
+        SetChannelRolePermissionRequest, SetMemberRolesRequest, SetSpacesOrderRequest,
+        TimeoutRequest, UpdateAccountRequest, UpdateChannelRestrictedRequest,
+        UpdateChannelVisibilityRequest, UpdateNicknameRequest, UpdateRoleRequest,
+        UpdateServerVisibilityRequest, VerifyRegistrationRequest,
     },
     error::ApiError,
     extract::{AuthenticatedUser, SESSION_COOKIE_NAME},
@@ -376,7 +377,57 @@ pub async fn create_channel(
         .domain
         .create_channel(context.account_id, server_id, body.into())
         .await?;
+    if let Err(err) = state.realtime.publish_channel_create(&channel).await {
+        tracing::warn!(error = %err, "failed to publish channel.create event");
+    }
     Ok((StatusCode::CREATED, Json(channel.into())))
+}
+
+pub async fn rename_channel(
+    State(state): State<AppState>,
+    AuthenticatedUser(context): AuthenticatedUser,
+    Path((server_id, channel_id)): Path<(Uuid, Uuid)>,
+    body: Result<Json<RenameChannelRequest>, JsonRejection>,
+) -> Result<Json<ChannelResponse>, ApiError> {
+    let Json(body) = body?;
+    let channel = state
+        .domain
+        .rename_channel(
+            context.account_id,
+            server_id,
+            channel_id,
+            domain::RenameChannelInput {
+                name: body.name,
+                title: body.title,
+            },
+        )
+        .await?;
+    if let Err(err) = state.realtime.publish_channel_update(&channel).await {
+        tracing::warn!(error = %err, "failed to publish channel.update event");
+    }
+    Ok(Json(channel.into()))
+}
+
+pub async fn reorder_channels(
+    State(state): State<AppState>,
+    AuthenticatedUser(context): AuthenticatedUser,
+    Path(server_id): Path<Uuid>,
+    body: Result<Json<ReorderChannelsRequest>, JsonRejection>,
+) -> Result<Json<PagedResponse<ChannelResponse>>, ApiError> {
+    let Json(body) = body?;
+    let channels = state
+        .domain
+        .reorder_channels(context.account_id, server_id, body.channel_ids)
+        .await?;
+    for channel in &channels {
+        if let Err(err) = state.realtime.publish_channel_update(channel).await {
+            tracing::warn!(error = %err, "failed to publish channel.update event");
+        }
+    }
+    Ok(Json(PagedResponse {
+        items: channels.into_iter().map(Into::into).collect(),
+        next_cursor: None,
+    }))
 }
 
 pub async fn list_channels(
@@ -400,10 +451,23 @@ pub async fn delete_channel(
     AuthenticatedUser(context): AuthenticatedUser,
     Path((server_id, channel_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
+    // Capture recipients BEFORE the soft-delete makes the channel inaccessible.
+    let recipients = state
+        .domain
+        .channel_viewer_account_ids_for_server(channel_id, Some(server_id))
+        .await
+        .unwrap_or_default();
+
     state
         .domain
         .delete_channel(context.account_id, server_id, channel_id)
         .await?;
+
+    state
+        .realtime
+        .announce_channel_delete(&recipients, server_id, channel_id)
+        .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 

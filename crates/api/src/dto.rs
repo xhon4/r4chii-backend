@@ -1040,6 +1040,25 @@ pub struct ReorderRolesRequest {
     pub role_ids: Vec<Uuid>,
 }
 
+/// `PATCH /api/v1/servers/{id}/channels/{channel_id}` body — `name` for
+/// `text`/`voice`, `title` for `thread`. Exactly one must be present; `slug`
+/// is never written.
+#[derive(Debug, Deserialize)]
+pub struct RenameChannelRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// `PATCH /api/v1/servers/{id}/channels/positions` body — full ordered list
+/// of every live non-thread channel id in the server.
+#[derive(Debug, Deserialize)]
+pub struct ReorderChannelsRequest {
+    #[serde(alias = "ordered_channel_ids")]
+    pub channel_ids: Vec<Uuid>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SetMemberRolesRequest {
     pub role_ids: Vec<Uuid>,
