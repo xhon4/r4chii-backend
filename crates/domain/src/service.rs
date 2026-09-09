@@ -859,8 +859,8 @@ impl DomainService {
     /// authenticated member always may; anyone else (including an
     /// unauthenticated `actor: None`, the case the public read path
     /// needs) may only if the channel's EFFECTIVE visibility — its own
-    /// override, or its server's visibility if the override is unset — is
-    /// `public` or `unlisted`. `dm`/`group_dm` channels sit outside this axis
+    /// override capped at its server's visibility, or its server's
+    /// visibility if the override is unset — is `public` or `unlisted`. `dm`/`group_dm` channels sit outside this axis
     /// entirely (no `server_id` to resolve a visibility from) and always
     /// resolve to `ChannelNotFound` for a non-member, same as today.
     ///
@@ -883,7 +883,16 @@ impl DomainService {
 
         let server_id = ctx.server_id.ok_or(DomainError::ChannelNotFound)?;
         let server_visibility = ctx.server_visibility.ok_or(DomainError::ChannelNotFound)?;
-        let effective = ctx.channel_visibility.unwrap_or(server_visibility);
+        // The write-time ceiling in `update_channel_visibility` is re-applied
+        // here: flipping a server to `private` leaves any broader channel
+        // override in place, so a stale override must never outrank its
+        // server's own visibility.
+        let effective = match ctx.channel_visibility {
+            Some(channel) if visibility_rank(&channel) <= visibility_rank(&server_visibility) => {
+                channel
+            }
+            _ => server_visibility,
+        };
 
         if ctx.restricted {
             let Some(account_id) = actor else {

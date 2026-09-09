@@ -201,3 +201,49 @@ async fn only_the_owner_can_update_server_visibility() {
         .expect("owner can flip server visibility");
     assert_eq!(updated.visibility, "public");
 }
+
+#[tokio::test]
+async fn a_channel_override_does_not_survive_its_server_being_made_private() {
+    let (domain, auth, _container) = test_services().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+
+    let server = domain
+        .create_server(alice, create_server_input("Public Place", Some("public")))
+        .await
+        .expect("create_server succeeds");
+    let channel = domain
+        .create_channel(
+            alice,
+            server.id,
+            CreateChannelInput { name: "general".to_string(), kind: None },
+        )
+        .await
+        .expect("create_channel succeeds");
+
+    // Legal at write time: the server is public, so a public override ranks
+    // no higher than its server.
+    domain
+        .update_channel_visibility(alice, server.id, channel.id, Some("public".to_string()))
+        .await
+        .expect("a public override on a public server is allowed");
+
+    let allowed = domain
+        .resolve_read_access(None, channel.id)
+        .await
+        .expect("the override is readable while the server is still public");
+    assert_eq!(allowed, ReadAccess::Public);
+
+    // Flipping the server does not rewrite the override, so the read path is
+    // the only thing standing between a stale `public` override and a
+    // private server's content.
+    domain
+        .update_server_visibility(alice, server.id, "private".to_string())
+        .await
+        .expect("owner can flip server visibility");
+
+    let denied = domain.resolve_read_access(None, channel.id).await;
+    assert!(
+        matches!(denied, Err(DomainError::ChannelNotFound)),
+        "a stale public channel override must not outrank its now-private server"
+    );
+}
