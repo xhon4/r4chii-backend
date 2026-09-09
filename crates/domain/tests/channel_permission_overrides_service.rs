@@ -15,22 +15,38 @@ use domain::{
 mod common;
 use common::*;
 
-async fn create_server(domain: &DomainService, owner: Uuid, name: &str, visibility: Option<&str>) -> ServerSummary {
+async fn create_server(
+    domain: &DomainService,
+    owner: Uuid,
+    name: &str,
+    visibility: Option<&str>,
+) -> ServerSummary {
     domain
         .create_server(
             owner,
-            CreateServerInput { name: name.to_string(), visibility: visibility.map(str::to_string) },
+            CreateServerInput {
+                name: name.to_string(),
+                visibility: visibility.map(str::to_string),
+            },
         )
         .await
         .expect("create_server succeeds")
 }
 
-async fn create_channel(domain: &DomainService, owner: Uuid, server_id: Uuid, name: &str) -> ChannelSummary {
+async fn create_channel(
+    domain: &DomainService,
+    owner: Uuid,
+    server_id: Uuid,
+    name: &str,
+) -> ChannelSummary {
     domain
         .create_channel(
             owner,
             server_id,
-            CreateChannelInput { name: name.to_string(), kind: None },
+            CreateChannelInput {
+                name: name.to_string(),
+                kind: None,
+            },
         )
         .await
         .expect("create_channel succeeds")
@@ -52,7 +68,13 @@ async fn grant_channel_view(
     role_name: &str,
 ) {
     let role = domain
-        .create_role(owner, server_id, CreateRoleInput { name: role_name.to_string() })
+        .create_role(
+            owner,
+            server_id,
+            CreateRoleInput {
+                name: role_name.to_string(),
+            },
+        )
         .await
         .expect("create_role succeeds");
     domain
@@ -60,7 +82,13 @@ async fn grant_channel_view(
         .await
         .expect("set_member_roles succeeds");
     domain
-        .set_channel_role_permission(owner, server_id, channel_id, role.id, channel_permissions::VIEW_CHANNEL)
+        .set_channel_role_permission(
+            owner,
+            server_id,
+            channel_id,
+            role.id,
+            channel_permissions::VIEW_CHANNEL,
+        )
         .await
         .expect("set_channel_role_permission succeeds");
 }
@@ -190,11 +218,20 @@ async fn an_unrestricted_channel_is_visible_to_every_member_as_before() {
     join(&domain, plain, server.invite_code.as_ref().unwrap()).await;
     let channel = create_channel(&domain, owner, server.id, "general").await;
 
-    let channels = domain.list_channels(plain, server.id).await.expect("list_channels succeeds");
+    let channels = domain
+        .list_channels(plain, server.id)
+        .await
+        .expect("list_channels succeeds");
     assert!(channels.iter().any(|c| c.id == channel.id));
 
     let send = domain
-        .send_message(plain, channel.id, SendMessageInput { content: "hi".to_string() })
+        .send_message(
+            plain,
+            channel.id,
+            SendMessageInput {
+                content: "hi".to_string(),
+            },
+        )
         .await;
     assert!(send.is_ok());
 }
@@ -219,14 +256,26 @@ async fn a_restricted_channel_is_absent_from_list_channels_without_a_grant() {
         .expect("update_channel_restricted succeeds");
     grant_channel_view(&domain, owner, server.id, channel.id, staff, "Staff").await;
 
-    let plain_channels = domain.list_channels(plain, server.id).await.expect("list_channels succeeds");
+    let plain_channels = domain
+        .list_channels(plain, server.id)
+        .await
+        .expect("list_channels succeeds");
     assert!(!plain_channels.iter().any(|c| c.id == channel.id));
 
-    let staff_channels = domain.list_channels(staff, server.id).await.expect("list_channels succeeds");
+    let staff_channels = domain
+        .list_channels(staff, server.id)
+        .await
+        .expect("list_channels succeeds");
     assert!(staff_channels.iter().any(|c| c.id == channel.id));
 
-    let owner_channels = domain.list_channels(owner, server.id).await.expect("list_channels succeeds");
-    assert!(owner_channels.iter().any(|c| c.id == channel.id), "the owner always sees it");
+    let owner_channels = domain
+        .list_channels(owner, server.id)
+        .await
+        .expect("list_channels succeeds");
+    assert!(
+        owner_channels.iter().any(|c| c.id == channel.id),
+        "the owner always sees it"
+    );
 }
 
 #[tokio::test]
@@ -244,11 +293,19 @@ async fn a_plain_member_cannot_send_or_read_in_a_restricted_channel_without_a_gr
         .expect("update_channel_restricted succeeds");
 
     let send = domain
-        .send_message(plain, channel.id, SendMessageInput { content: "hi".to_string() })
+        .send_message(
+            plain,
+            channel.id,
+            SendMessageInput {
+                content: "hi".to_string(),
+            },
+        )
         .await;
     assert!(matches!(send, Err(DomainError::ChannelNotFound)));
 
-    let list = domain.list_messages(plain, channel.id, Default::default()).await;
+    let list = domain
+        .list_messages(plain, channel.id, Default::default())
+        .await;
     assert!(matches!(list, Err(DomainError::ChannelNotFound)));
 }
 
@@ -268,7 +325,10 @@ async fn a_thread_inherits_its_parent_channels_restriction_not_its_own() {
         .create_thread(
             owner,
             channel.id,
-            CreateThreadInput { title: "planning".to_string(), root_message_id: None },
+            CreateThreadInput {
+                title: "planning".to_string(),
+                root_message_id: None,
+            },
         )
         .await
         .expect("create_thread succeeds");
@@ -285,14 +345,18 @@ async fn a_thread_inherits_its_parent_channels_restriction_not_its_own() {
     assert!(matches!(plain_denied, Err(DomainError::ChannelNotFound)));
 
     // Staff, granted on the PARENT channel, can.
-    let staff_threads = domain.list_threads(staff, channel.id).await.expect("list_threads succeeds");
+    let staff_threads = domain
+        .list_threads(staff, channel.id)
+        .await
+        .expect("list_threads succeeds");
     assert!(staff_threads.iter().any(|t| t.id == thread.id));
 }
 
 // ---- the critical case: never leaks through the public surfaces ----
 
 #[tokio::test]
-async fn a_restricted_channel_in_a_public_server_never_appears_in_the_sitemap_or_public_read_path() {
+async fn a_restricted_channel_in_a_public_server_never_appears_in_the_sitemap_or_public_read_path()
+{
     let (domain, auth, _container) = test_services().await;
     let owner = register(&auth, "owner5@example.com", "owner5").await;
 
@@ -302,15 +366,24 @@ async fn a_restricted_channel_in_a_public_server_never_appears_in_the_sitemap_or
         .create_thread(
             owner,
             channel.id,
-            CreateThreadInput { title: "secret planning".to_string(), root_message_id: None },
+            CreateThreadInput {
+                title: "secret planning".to_string(),
+                root_message_id: None,
+            },
         )
         .await
         .expect("create_thread succeeds");
 
     // Sanity: BEFORE restricting, the thread is genuinely public.
-    let before = domain.resolve_read_access(None, thread.id).await.expect("resolves");
+    let before = domain
+        .resolve_read_access(None, thread.id)
+        .await
+        .expect("resolves");
     assert_eq!(before, ReadAccess::Public);
-    let sitemap_before = domain.list_public_threads().await.expect("list_public_threads succeeds");
+    let sitemap_before = domain
+        .list_public_threads()
+        .await
+        .expect("list_public_threads succeeds");
     assert!(sitemap_before.iter().any(|t| t.id == thread.id));
 
     domain
@@ -327,7 +400,10 @@ async fn a_restricted_channel_in_a_public_server_never_appears_in_the_sitemap_or
     );
 
     // And it must be gone from the sitemap that drives crawler discovery.
-    let sitemap_after = domain.list_public_threads().await.expect("list_public_threads succeeds");
+    let sitemap_after = domain
+        .list_public_threads()
+        .await
+        .expect("list_public_threads succeeds");
     assert!(
         !sitemap_after.iter().any(|t| t.id == thread.id),
         "a restricted channel's threads must never appear in the public sitemap"
@@ -345,7 +421,10 @@ async fn a_restricted_channel_in_a_public_server_never_appears_in_the_sitemap_or
     let staff = register(&auth, "staff5@example.com", "staff5").await;
     join(&domain, staff, server.invite_code.as_ref().unwrap()).await;
     grant_channel_view(&domain, owner, server.id, channel.id, staff, "Staff").await;
-    let staff_access = domain.resolve_read_access(Some(staff), thread.id).await.expect("resolves");
+    let staff_access = domain
+        .resolve_read_access(Some(staff), thread.id)
+        .await
+        .expect("resolves");
     assert_eq!(staff_access, ReadAccess::Member);
 }
 
@@ -364,7 +443,13 @@ async fn search_excludes_a_restricted_channels_messages_for_a_member_without_a_g
     let channel = create_channel(&domain, owner, server.id, "staff-only").await;
 
     domain
-        .send_message(owner, channel.id, SendMessageInput { content: "unique-classified-plan".to_string() })
+        .send_message(
+            owner,
+            channel.id,
+            SendMessageInput {
+                content: "unique-classified-plan".to_string(),
+            },
+        )
         .await
         .expect("send_message succeeds");
 
@@ -375,7 +460,14 @@ async fn search_excludes_a_restricted_channels_messages_for_a_member_without_a_g
     grant_channel_view(&domain, owner, server.id, channel.id, staff, "Staff").await;
 
     let plain_results = domain
-        .search_messages(plain, server.id, SearchInput { query: "unique-classified-plan".to_string(), ..Default::default() })
+        .search_messages(
+            plain,
+            server.id,
+            SearchInput {
+                query: "unique-classified-plan".to_string(),
+                ..Default::default()
+            },
+        )
         .await
         .expect("search_messages succeeds");
     assert!(
@@ -384,13 +476,31 @@ async fn search_excludes_a_restricted_channels_messages_for_a_member_without_a_g
     );
 
     let staff_results = domain
-        .search_messages(staff, server.id, SearchInput { query: "unique-classified-plan".to_string(), ..Default::default() })
+        .search_messages(
+            staff,
+            server.id,
+            SearchInput {
+                query: "unique-classified-plan".to_string(),
+                ..Default::default()
+            },
+        )
         .await
         .expect("search_messages succeeds");
-    assert_eq!(staff_results.len(), 1, "a granted member's search still finds it");
+    assert_eq!(
+        staff_results.len(),
+        1,
+        "a granted member's search still finds it"
+    );
 
     let owner_results = domain
-        .search_messages(owner, server.id, SearchInput { query: "unique-classified-plan".to_string(), ..Default::default() })
+        .search_messages(
+            owner,
+            server.id,
+            SearchInput {
+                query: "unique-classified-plan".to_string(),
+                ..Default::default()
+            },
+        )
         .await
         .expect("search_messages succeeds");
     assert_eq!(owner_results.len(), 1, "the owner bypasses the restriction");
@@ -408,22 +518,45 @@ async fn only_manage_channels_can_flip_restricted_or_grant_a_role() {
     join(&domain, plain, server.invite_code.as_ref().unwrap()).await;
     let channel = create_channel(&domain, owner, server.id, "general").await;
 
-    let denied_restrict = domain.update_channel_restricted(plain, server.id, channel.id, true).await;
-    assert!(matches!(denied_restrict, Err(DomainError::MissingPermission)));
+    let denied_restrict = domain
+        .update_channel_restricted(plain, server.id, channel.id, true)
+        .await;
+    assert!(matches!(
+        denied_restrict,
+        Err(DomainError::MissingPermission)
+    ));
 
     let role = domain
-        .create_role(owner, server.id, CreateRoleInput { name: "Staff".to_string() })
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "Staff".to_string(),
+            },
+        )
         .await
         .expect("create_role succeeds");
     let denied_grant = domain
-        .set_channel_role_permission(plain, server.id, channel.id, role.id, channel_permissions::VIEW_CHANNEL)
+        .set_channel_role_permission(
+            plain,
+            server.id,
+            channel.id,
+            role.id,
+            channel_permissions::VIEW_CHANNEL,
+        )
         .await;
     assert!(matches!(denied_grant, Err(DomainError::MissingPermission)));
 
     // Granting MANAGE_CHANNELS (M2's existing bit) is enough — no new bit
     // was needed for this ADR's admin actions.
     let manage_channels_role = domain
-        .create_role(owner, server.id, CreateRoleInput { name: "Channel Admin".to_string() })
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "Channel Admin".to_string(),
+            },
+        )
         .await
         .expect("create_role succeeds");
     domain
@@ -450,7 +583,13 @@ async fn only_manage_channels_can_flip_restricted_or_grant_a_role() {
         .await
         .expect("MANAGE_CHANNELS holder may flip restricted");
     domain
-        .set_channel_role_permission(plain, server.id, channel.id, role.id, channel_permissions::VIEW_CHANNEL)
+        .set_channel_role_permission(
+            plain,
+            server.id,
+            channel.id,
+            role.id,
+            channel_permissions::VIEW_CHANNEL,
+        )
         .await
         .expect("MANAGE_CHANNELS holder may grant a role");
 }
@@ -463,19 +602,40 @@ async fn a_thread_cannot_be_restricted_or_granted_directly() {
     let server = create_server(&domain, owner, "Server8", None).await;
     let channel = create_channel(&domain, owner, server.id, "general").await;
     let thread = domain
-        .create_thread(owner, channel.id, CreateThreadInput { title: "topic".to_string(), root_message_id: None })
+        .create_thread(
+            owner,
+            channel.id,
+            CreateThreadInput {
+                title: "topic".to_string(),
+                root_message_id: None,
+            },
+        )
         .await
         .expect("create_thread succeeds");
 
-    let restrict_result = domain.update_channel_restricted(owner, server.id, thread.id, true).await;
+    let restrict_result = domain
+        .update_channel_restricted(owner, server.id, thread.id, true)
+        .await;
     assert!(matches!(restrict_result, Err(DomainError::Validation(_))));
 
     let role = domain
-        .create_role(owner, server.id, CreateRoleInput { name: "Staff".to_string() })
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "Staff".to_string(),
+            },
+        )
         .await
         .expect("create_role succeeds");
     let grant_result = domain
-        .set_channel_role_permission(owner, server.id, thread.id, role.id, channel_permissions::VIEW_CHANNEL)
+        .set_channel_role_permission(
+            owner,
+            server.id,
+            thread.id,
+            role.id,
+            channel_permissions::VIEW_CHANNEL,
+        )
         .await;
     assert!(matches!(grant_result, Err(DomainError::Validation(_))));
 }
@@ -511,9 +671,18 @@ async fn can_join_voice_respects_permissions_restrictions_and_channel_kind() {
         .await
         .expect("voice channel creates");
 
-    assert!(domain.can_join_voice(owner, voice_channel.id).await.unwrap());
-    assert!(domain.can_join_voice(alice, voice_channel.id).await.unwrap());
-    assert!(!domain.can_join_voice(non_member, voice_channel.id).await.unwrap());
+    assert!(domain
+        .can_join_voice(owner, voice_channel.id)
+        .await
+        .unwrap());
+    assert!(domain
+        .can_join_voice(alice, voice_channel.id)
+        .await
+        .unwrap());
+    assert!(!domain
+        .can_join_voice(non_member, voice_channel.id)
+        .await
+        .unwrap());
 
     // 3. Restricted voice channel -> only owner, admin, or role with VIEW_CHANNEL can join
     let secret_voice = domain
@@ -558,6 +727,8 @@ async fn can_join_voice_respects_permissions_restrictions_and_channel_kind() {
         .await
         .expect("timeout succeeds");
     assert!(!domain.can_join_voice(alice, secret_voice.id).await.unwrap());
-    assert!(!domain.can_join_voice(alice, voice_channel.id).await.unwrap());
+    assert!(!domain
+        .can_join_voice(alice, voice_channel.id)
+        .await
+        .unwrap());
 }
-
