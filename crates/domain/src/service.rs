@@ -82,6 +82,7 @@ impl From<db::server::ServerWithRoleRow> for ServerSummary {
             owner_account_id: row.owner_account_id,
             invite_code,
             created_at: row.created_at,
+            spaces_position: row.spaces_position,
         }
     }
 }
@@ -323,7 +324,48 @@ impl DomainService {
             owner_account_id: server.owner_account_id,
             invite_code: Some(server.invite_code),
             created_at: server.created_at,
+            // Brand new membership: never pre-pinned into "ur spaces".
+            spaces_position: None,
         })
+    }
+
+    /// Replaces the caller's whole "ur spaces" list — not a diff: every id
+    /// in `ordered_server_ids` gets a position (its index), and every other
+    /// membership of theirs currently in the list falls out of it. A subset
+    /// of their memberships, not "every server exactly once" the way
+    /// `reorder_roles` requires for a server's full role list — "ur spaces"
+    /// is opt-in curation, not a complete ordering.
+    pub async fn set_spaces_order(
+        &self,
+        account_id: Uuid,
+        ordered_server_ids: Vec<Uuid>,
+    ) -> Result<Vec<ServerSummary>, DomainError> {
+        let memberships = db::server::list_for_account(&self.pool, account_id).await?;
+        let member_of: HashSet<Uuid> = memberships.iter().map(|row| row.id).collect();
+        for server_id in &ordered_server_ids {
+            if !member_of.contains(server_id) {
+                // Same non-leaking shape as everywhere else a caller names a
+                // server they have no membership row for.
+                return Err(DomainError::ServerNotFound);
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+        for (index, server_id) in ordered_server_ids.iter().enumerate() {
+            db::server::set_membership_spaces_position(
+                &mut *tx,
+                account_id,
+                *server_id,
+                Some(index as i32),
+            )
+            .await?;
+        }
+        db::server::clear_spaces_position_except(&mut *tx, account_id, &ordered_server_ids)
+            .await?;
+        tx.commit().await?;
+
+        let rows = db::server::list_for_account(&self.pool, account_id).await?;
+        Ok(rows.into_iter().map(Into::into).collect())
     }
 
     pub async fn list_servers(&self, account_id: Uuid) -> Result<Vec<ServerSummary>, DomainError> {
@@ -366,6 +408,7 @@ impl DomainService {
             owner_account_id: row.owner_account_id,
             invite_code,
             created_at: row.created_at,
+            spaces_position: row.spaces_position,
         })
     }
 
@@ -379,6 +422,12 @@ impl DomainService {
     ) -> Result<ServerSummary, DomainError> {
         self.require_permission(account_id, server_id, permissions::MANAGE_INVITES)
             .await?;
+
+        // `update_invite_code` touches only `server`, not `membership`, so it
+        // can't carry the caller's own `spaces_position` — fetched separately.
+        let spaces_position = db::server::get_for_account(&self.pool, account_id, server_id)
+            .await?
+            .and_then(|row| row.spaces_position);
 
         let new_code = generate_invite_code();
         let updated = db::server::update_invite_code(&self.pool, server_id, &new_code)
@@ -395,6 +444,7 @@ impl DomainService {
             owner_account_id: updated.owner_account_id,
             invite_code: Some(updated.invite_code),
             created_at: updated.created_at,
+            spaces_position,
         })
     }
 
@@ -799,6 +849,9 @@ impl DomainService {
             owner_account_id: updated.owner_account_id,
             invite_code: Some(updated.invite_code),
             created_at: updated.created_at,
+            // `update_visibility` doesn't touch `membership`; carried over
+            // from the `server` prefetch above, which already has it.
+            spaces_position: server.spaces_position,
         })
     }
 
@@ -1276,6 +1329,8 @@ impl DomainService {
             owner_account_id: server.owner_account_id,
             invite_code: None,
             created_at: server.created_at,
+            // Brand new membership: never pre-pinned into "ur spaces".
+            spaces_position: None,
         })
     }
 

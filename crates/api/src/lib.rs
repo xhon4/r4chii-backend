@@ -126,6 +126,10 @@ pub fn router(state: AppState) -> Router {
                 domain::ImagePurpose::Banner.max_upload_bytes(),
             )),
         )
+        .route(
+            "/api/v1/accounts/me/spaces",
+            patch(handlers::set_spaces_order),
+        )
         .layer(GovernorLayer::new(profile_write_config).error_handler(rate_limit::error_response))
         .with_state(state.clone());
 

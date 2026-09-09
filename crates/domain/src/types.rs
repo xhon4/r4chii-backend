@@ -39,6 +39,9 @@ pub struct ServerSummary {
     /// default this slice was told to keep.
     pub invite_code: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// `None` means this server isn't in the caller's curated "ur spaces"
+    /// list; `Some(position)` is its place in that list (lower = earlier).
+    pub spaces_position: Option<i32>,
 }
 
 /// Public-safe view of a `channel` row. `server_id` is `None` for `dm`/

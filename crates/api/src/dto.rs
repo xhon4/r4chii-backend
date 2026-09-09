@@ -771,6 +771,9 @@ pub struct ServerResponse {
     pub owner_account_id: Uuid,
     pub invite_code: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// `null` unless the caller has curated this server into "ur spaces";
+    /// otherwise its position there (lower = earlier).
+    pub spaces_position: Option<i32>,
 }
 
 impl From<domain::ServerSummary> for ServerResponse {
@@ -783,8 +786,17 @@ impl From<domain::ServerSummary> for ServerResponse {
             owner_account_id: server.owner_account_id,
             invite_code: server.invite_code,
             created_at: server.created_at,
+            spaces_position: server.spaces_position,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetSpacesOrderRequest {
+    /// Every server id the caller wants in "ur spaces", in order. Not a
+    /// diff — a membership of theirs missing from this list falls out of
+    /// "ur spaces"; one already absent from it just stays absent.
+    pub server_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]

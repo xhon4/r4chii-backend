@@ -24,7 +24,7 @@ use crate::{
         ProfileSummaryResponse, RegisterRequest, ReorderRolesRequest, ResendCodeRequest,
         RoleResponse, SendFriendRequestRequest, SendMessageRequest, ServerMemberResponse,
         ServerResponse, SessionResponse, SetChannelRolePermissionRequest, SetMemberRolesRequest,
-        TimeoutRequest, UpdateAccountRequest, UpdateChannelRestrictedRequest,
+        SetSpacesOrderRequest, TimeoutRequest, UpdateAccountRequest, UpdateChannelRestrictedRequest,
         UpdateChannelVisibilityRequest, UpdateNicknameRequest, UpdateRoleRequest,
         UpdateServerVisibilityRequest, VerifyRegistrationRequest,
     },
@@ -346,6 +346,23 @@ pub async fn get_server(
         .get_server(context.account_id, server_id)
         .await?;
     Ok(Json(server.into()))
+}
+
+pub async fn set_spaces_order(
+    State(state): State<AppState>,
+    AuthenticatedUser(context): AuthenticatedUser,
+    body: Result<Json<SetSpacesOrderRequest>, JsonRejection>,
+) -> Result<Json<PagedResponse<ServerResponse>>, ApiError> {
+    let Json(body) = body?;
+    let servers = state
+        .domain
+        .set_spaces_order(context.account_id, body.server_ids)
+        .await?;
+
+    Ok(Json(PagedResponse {
+        items: servers.into_iter().map(Into::into).collect(),
+        next_cursor: None,
+    }))
 }
 
 pub async fn create_channel(

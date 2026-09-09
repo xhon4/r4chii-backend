@@ -29,6 +29,7 @@ pub struct ServerWithRoleRow {
     pub invite_code: String,
     pub created_at: DateTime<Utc>,
     pub role: String,
+    pub spaces_position: Option<i32>,
 }
 
 pub async fn insert(
@@ -59,7 +60,7 @@ pub async fn list_for_account(
 ) -> Result<Vec<ServerWithRoleRow>, sqlx::Error> {
     sqlx::query_as::<_, ServerWithRoleRow>(
         "SELECT s.id, s.owner_account_id, s.name, s.icon_url, s.visibility, \
-                s.invite_code, s.created_at, m.role \
+                s.invite_code, s.created_at, m.role, m.spaces_position \
          FROM server s \
          JOIN membership m ON m.server_id = s.id \
          WHERE m.account_id = $1 \
@@ -77,7 +78,7 @@ pub async fn get_for_account(
 ) -> Result<Option<ServerWithRoleRow>, sqlx::Error> {
     sqlx::query_as::<_, ServerWithRoleRow>(
         "SELECT s.id, s.owner_account_id, s.name, s.icon_url, s.visibility, \
-                s.invite_code, s.created_at, m.role \
+                s.invite_code, s.created_at, m.role, m.spaces_position \
          FROM server s \
          JOIN membership m ON m.server_id = s.id \
          WHERE s.id = $1 AND m.account_id = $2",
@@ -150,6 +151,48 @@ pub async fn update_invite_code(
     .bind(server_id)
     .fetch_optional(executor)
     .await
+}
+
+/// Sets (or clears, with `None`) one membership's position in the caller's
+/// curated "ur spaces" list. Scoped to `account_id` in the `WHERE` clause
+/// rather than trusting a pre-fetched membership id, so a stale/forged
+/// `server_id` just affects zero rows instead of someone else's membership.
+pub async fn set_membership_spaces_position(
+    executor: impl PgExecutor<'_>,
+    account_id: Uuid,
+    server_id: Uuid,
+    spaces_position: Option<i32>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE membership SET spaces_position = $1 \
+         WHERE account_id = $2 AND server_id = $3",
+    )
+    .bind(spaces_position)
+    .bind(account_id)
+    .bind(server_id)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Clears `spaces_position` on every membership of `account_id` NOT in
+/// `keep_server_ids` — the other half of a full reorder: whatever the new
+/// list no longer names has fallen out of "ur spaces".
+pub async fn clear_spaces_position_except(
+    executor: impl PgExecutor<'_>,
+    account_id: Uuid,
+    keep_server_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE membership SET spaces_position = NULL \
+         WHERE account_id = $1 AND spaces_position IS NOT NULL \
+         AND NOT (server_id = ANY($2))",
+    )
+    .bind(account_id)
+    .bind(keep_server_ids)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// A server's member: their `membership.role` joined with the public-safe

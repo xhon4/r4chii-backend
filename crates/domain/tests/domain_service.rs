@@ -618,3 +618,68 @@ async fn voice_channels_appear_in_list_channels() {
     assert!(channels.iter().any(|c| c.kind == "text"));
     assert!(channels.iter().any(|c| c.kind == "voice"));
 }
+
+#[tokio::test]
+async fn set_spaces_order_positions_every_listed_server_and_leaves_the_rest_unpinned() {
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let first = domain
+        .create_server(alice, create_server_input("First"))
+        .await
+        .expect("create_server succeeds");
+    let second = domain
+        .create_server(alice, create_server_input("Second"))
+        .await
+        .expect("create_server succeeds");
+    let third = domain
+        .create_server(alice, create_server_input("Third"))
+        .await
+        .expect("create_server succeeds");
+
+    let servers = domain
+        .set_spaces_order(alice, vec![second.id, first.id])
+        .await
+        .expect("set_spaces_order succeeds");
+
+    let by_id = |id| servers.iter().find(|s| s.id == id).expect("server present");
+    assert_eq!(by_id(second.id).spaces_position, Some(0));
+    assert_eq!(by_id(first.id).spaces_position, Some(1));
+    assert_eq!(by_id(third.id).spaces_position, None);
+}
+
+#[tokio::test]
+async fn set_spaces_order_unpins_a_server_dropped_from_a_later_call() {
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let server = domain
+        .create_server(alice, create_server_input("Pinned Then Dropped"))
+        .await
+        .expect("create_server succeeds");
+
+    domain
+        .set_spaces_order(alice, vec![server.id])
+        .await
+        .expect("first set_spaces_order succeeds");
+    let servers = domain
+        .set_spaces_order(alice, vec![])
+        .await
+        .expect("second set_spaces_order succeeds");
+
+    assert_eq!(servers[0].id, server.id);
+    assert_eq!(servers[0].spaces_position, None);
+}
+
+#[tokio::test]
+async fn set_spaces_order_rejects_a_server_the_caller_is_not_a_member_of() {
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+    let bobs_server = domain
+        .create_server(bob, create_server_input("Bob's Place"))
+        .await
+        .expect("create_server succeeds");
+
+    let result = domain.set_spaces_order(alice, vec![bobs_server.id]).await;
+
+    assert!(matches!(result, Err(DomainError::ServerNotFound)));
+}
