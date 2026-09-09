@@ -705,9 +705,8 @@ impl DomainService {
     /// Full replace of one role's grant on one channel — gated on
     /// `MANAGE_CHANNELS`, same tier as `update_channel_restricted` and the
     /// same bit Nerimity's own channel-permission endpoint uses. `bits` is
-    /// masked to the known `channel_permissions::*` set so a stray/foreign
-    /// bit can never be persisted (same reasoning `DomainService::
-    /// known_permission_bits` already applies to the server-wide bitmask).
+    /// masked to `VIEW_CHANNEL` so a stray or unenforced bit can never be
+    /// persisted.
     /// Rejects a `thread` id for the same reason `update_channel_restricted`
     /// does.
     pub async fn set_channel_role_permission(
@@ -736,15 +735,11 @@ impl DomainService {
             .await?
             .ok_or(DomainError::RoleNotFound)?;
 
-        let known_bits = channel_permissions::VIEW_CHANNEL
-            | channel_permissions::SEND_MESSAGE
-            | channel_permissions::JOIN_VOICE;
-
         db::channel::upsert_channel_role_permission(
             &self.pool,
             channel_id,
             role_id,
-            bits & known_bits,
+            bits & channel_permissions::VIEW_CHANNEL,
         )
         .await?;
 

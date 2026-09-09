@@ -68,6 +68,119 @@ async fn grant_channel_view(
 // ---- baseline: unrestricted is unaffected ----
 
 #[tokio::test]
+async fn channel_role_permission_setter_discards_unknown_bits() {
+    let (domain, auth, pool, _container) = test_services_with_pool().await;
+    let owner = register(&auth, "owner_bits@example.com", "owner_bits").await;
+    let server = create_server(&domain, owner, "Permission Bits", None).await;
+    let channel = create_channel(&domain, owner, server.id, "staff-only").await;
+    let role = domain
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "Staff".to_string(),
+            },
+        )
+        .await
+        .expect("create_role succeeds");
+
+    domain
+        .set_channel_role_permission(
+            owner,
+            server.id,
+            channel.id,
+            role.id,
+            channel_permissions::VIEW_CHANNEL | 2 | 4 | (1 << 12),
+        )
+        .await
+        .expect("set_channel_role_permission succeeds");
+
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT permissions FROM channel_role_permission WHERE channel_id = $1 AND role_id = $2",
+    )
+    .bind(channel.id)
+    .bind(role.id)
+    .fetch_one(&pool)
+    .await
+    .expect("permission row exists");
+    assert_eq!(stored, channel_permissions::VIEW_CHANNEL);
+
+    domain
+        .set_channel_role_permission(owner, server.id, channel.id, role.id, 2 | 4)
+        .await
+        .expect("set_channel_role_permission succeeds");
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT permissions FROM channel_role_permission WHERE channel_id = $1 AND role_id = $2",
+    )
+    .bind(channel.id)
+    .bind(role.id)
+    .fetch_one(&pool)
+    .await
+    .expect("permission row exists");
+    assert_eq!(stored, 0);
+}
+
+#[tokio::test]
+async fn canonicalize_channel_permissions_migration_preserves_rows_and_view_bits() {
+    let (domain, auth, pool, _container) = test_services_with_pool().await;
+    let owner = register(&auth, "owner_legacy_bits@example.com", "owner_legacy_bits").await;
+    let server = create_server(&domain, owner, "Legacy Permission Bits", None).await;
+    let channel = create_channel(&domain, owner, server.id, "staff-only").await;
+    let mut expected = Vec::new();
+
+    for (name, permissions) in [
+        (
+            "View and retired",
+            channel_permissions::VIEW_CHANNEL | 2 | 4,
+        ),
+        ("Retired only", 2 | 4),
+        ("View only", channel_permissions::VIEW_CHANNEL),
+    ] {
+        let role = domain
+            .create_role(
+                owner,
+                server.id,
+                CreateRoleInput {
+                    name: name.to_string(),
+                },
+            )
+            .await
+            .expect("create_role succeeds");
+        sqlx::query(
+            "INSERT INTO channel_role_permission (channel_id, role_id, permissions) VALUES ($1, $2, $3)",
+        )
+        .bind(channel.id)
+        .bind(role.id)
+        .bind(permissions)
+        .execute(&pool)
+        .await
+        .expect("historical permission row inserts");
+        expected.push((role.id, permissions & channel_permissions::VIEW_CHANNEL));
+    }
+
+    sqlx::query(include_str!(
+        "../../../migrations/0021_canonicalize_channel_permissions.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("canonicalization migration succeeds");
+
+    for (role_id, expected_permissions) in expected {
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT permissions FROM channel_role_permission WHERE channel_id = $1 AND role_id = $2",
+        )
+        .bind(channel.id)
+        .bind(role_id)
+        .fetch_one(&pool)
+        .await
+        .expect("historical row remains");
+        assert_eq!(stored, expected_permissions);
+    }
+}
+
+// ---- baseline: unrestricted is unaffected ----
+
+#[tokio::test]
 async fn an_unrestricted_channel_is_visible_to_every_member_as_before() {
     let (domain, auth, _container) = test_services().await;
     let owner = register(&auth, "owner1@example.com", "owner1").await;
