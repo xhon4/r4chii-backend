@@ -32,6 +32,10 @@ pub enum StorageError {
     Put(String),
     #[error("failed to delete object: {0}")]
     Delete(String),
+    #[error("object not found")]
+    NotFound,
+    #[error("failed to fetch object: {0}")]
+    Get(String),
     #[error("failed to sign a url: {0}")]
     Presign(String),
     #[error("invalid presigning duration: {0}")]
@@ -186,6 +190,58 @@ impl StorageService {
         Ok(bucket
             .delete_object(Some(&self.credentials), key)
             .sign(REQUEST_EXPIRY))
+    }
+
+    fn signed_get_url(&self, key: &str) -> Result<Url, StorageError> {
+        let bucket = self.write_bucket()?;
+        bucket
+            .object_url(key)
+            .map_err(|_| StorageError::InvalidKey)?;
+        Ok(bucket
+            .get_object(Some(&self.credentials), key)
+            .sign(REQUEST_EXPIRY))
+    }
+
+    /// Fetches the object at `key` through the internal endpoint.
+    ///
+    /// Uses a SigV4-signed GET against `write_bucket()` (the compose-network
+    /// address) so the fetch never leaves the private network and the response
+    /// can be streamed back to the browser from the same origin that served
+    /// `r4chii.com` — avoiding Chrome's Local Network Access prompt.
+    pub async fn get_object(&self, key: &str) -> Result<(Vec<u8>, String), StorageError> {
+        let url = self.signed_get_url(key)?;
+        let response = self
+            .http_client()?
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| StorageError::Get("request failed".to_string()))?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(StorageError::NotFound);
+        }
+
+        if !response.status().is_success() {
+            return Err(StorageError::Get(format!(
+                "request returned HTTP {}",
+                response.status()
+            )));
+        }
+
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| StorageError::Get("failed to read body".to_string()))?
+            .to_vec();
+
+        Ok((bytes, content_type))
     }
 
     /// Stores `bytes` at `key`, replacing whatever was there.

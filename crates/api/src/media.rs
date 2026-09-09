@@ -21,10 +21,14 @@ use std::time::Duration;
 use crate::{dto::AccountResponse, error::ApiError, extract::AuthenticatedUser, AppState};
 
 /// How long a signed storage URL stays valid.
+///
+/// Kept for any path that still hands a presigned URL directly to a client
+/// (e.g. export downloads). Media reads no longer use it — they are proxied
+/// same-origin so the signature never leaves the backend.
+#[allow(dead_code)]
 const MEDIA_URL_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// How long a browser may reuse the redirect. Kept well under [`MEDIA_URL_TTL`]
-/// so a cached redirect can never outlive the signature it points at.
+/// How long a browser may reuse a media response.
 const MEDIA_REDIRECT_CACHE_SECONDS: u64 = 5 * 60;
 
 /// Reads the first file field out of a multipart body.
@@ -163,11 +167,18 @@ pub async fn upload_banner(
     Ok(Json(account))
 }
 
-/// Redirects to a freshly signed storage URL.
+/// Streams the object through the API (same-origin, no LNA).
 ///
 /// Authenticated like the profiles it serves. Without that, the stored path
 /// would hand permanent access to anyone who came across it, which is the
 /// property signing the storage URL exists to avoid.
+///
+/// Previously this issued a 307 redirect to a presigned `S3_PUBLIC_ENDPOINT`
+/// URL on the Tailscale tailnet (100.x, considered "private" by Chrome's
+/// Local Network Access). Browsers on r4chii.com (public) navigating to
+/// ts.net (private) triggered the LNA permission prompt; blocking it left
+/// avatars blank. Proxying through the backend keeps the fetch same-origin
+/// (`https://r4chii.com/api/v1/media/*`) and no LNA check applies.
 pub async fn get_media(
     State(state): State<AppState>,
     _caller: AuthenticatedUser,
@@ -187,26 +198,34 @@ pub async fn get_media(
 
     let storage = state.storage.as_ref().ok_or_else(storage_unavailable)?;
 
-    let url = storage
-        .presigned_get(&key, MEDIA_URL_TTL)
-        .await
-        .map_err(|err| {
-            ApiError::new(
-                StatusCode::BAD_GATEWAY,
-                "storage_read_failed",
-                err.to_string(),
-            )
-        })?;
+    let (bytes, content_type) = storage.get_object(&key).await.map_err(|err| match err {
+        storage::StorageError::NotFound => ApiError::new(
+            StatusCode::NOT_FOUND,
+            "media_not_found",
+            "media not found",
+        ),
+        storage::StorageError::InvalidKey => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_media_key",
+            "malformed key",
+        ),
+        other => ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "storage_read_failed",
+            other.to_string(),
+        ),
+    })?;
 
     Ok((
-        StatusCode::TEMPORARY_REDIRECT,
+        StatusCode::OK,
         [
-            (header::LOCATION, url),
+            (header::CONTENT_TYPE, content_type),
             (
                 header::CACHE_CONTROL,
                 format!("private, max-age={MEDIA_REDIRECT_CACHE_SECONDS}"),
             ),
         ],
+        bytes,
     )
         .into_response())
 }
