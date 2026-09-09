@@ -50,6 +50,8 @@ pub const PIN_MESSAGES: i64 = 1 << 11;
 /// see/rotate it.
 pub const MANAGE_INVITES: i64 = 1 << 12;
 
+pub const KNOWN_PERMISSION_BITS: i64 = (MANAGE_INVITES << 1) - 1;
+
 pub fn has(permissions: i64, bit: i64) -> bool {
     permissions & bit == bit
 }
@@ -97,5 +99,18 @@ mod tests {
                 }
             }
         }
+        assert_eq!(
+            bits.iter().copied().fold(0, |mask, bit| mask | bit),
+            KNOWN_PERMISSION_BITS
+        );
+    }
+
+    #[test]
+    fn known_permission_mask_discards_unknown_and_sign_bits() {
+        let valid = MANAGE_ROLES | MANAGE_INVITES;
+        let unknown = (1 << 13) | i64::MIN;
+
+        assert_eq!(KNOWN_PERMISSION_BITS, 0x1fff);
+        assert_eq!((valid | unknown) & KNOWN_PERMISSION_BITS, valid);
     }
 }

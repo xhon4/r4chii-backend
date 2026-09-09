@@ -1340,19 +1340,7 @@ impl DomainService {
     /// actually knows about — an old/foreign bit can never be persisted and
     /// later mean something nobody intended once it's assigned meaning.
     fn known_permission_bits(raw: i64) -> i64 {
-        raw & (permissions::ADMIN
-            | permissions::MANAGE_ROLES
-            | permissions::MANAGE_CHANNELS
-            | permissions::KICK
-            | permissions::BAN
-            | permissions::MANAGE_VISIBILITY
-            | permissions::MENTION_EVERYONE
-            | permissions::MENTION_ROLES
-            | permissions::MANAGE_NICKNAMES
-            | permissions::TIMEOUT_MEMBERS
-            | permissions::MANAGE_MESSAGES
-            | permissions::PIN_MESSAGES
-            | permissions::MANAGE_INVITES)
+        raw & permissions::KNOWN_PERMISSION_BITS
     }
 
     pub async fn create_role(
