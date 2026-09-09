@@ -254,10 +254,24 @@ pub async fn update_own_account(
     body: Result<Json<UpdateAccountRequest>, JsonRejection>,
 ) -> Result<Json<AccountResponse>, ApiError> {
     let Json(body) = body?;
+    let status_changed = body.status.is_some();
+    let custom_changed = body.custom_status.is_some();
     let account = state
         .auth
         .update_account(context.account_id, body.into())
         .await?;
+    if status_changed || custom_changed {
+        let declared = match account.status.as_str() {
+            "idle" => realtime::DeclaredStatus::Idle,
+            "dnd" => realtime::DeclaredStatus::Dnd,
+            "invisible" => realtime::DeclaredStatus::Invisible,
+            _ => realtime::DeclaredStatus::Online,
+        };
+        state
+            .realtime
+            .publish_declared_status(account.id, declared)
+            .await;
+    }
     let links = state.auth.list_profile_links(context.account_id).await?;
     Ok(Json(AccountResponse::build(account, links)))
 }

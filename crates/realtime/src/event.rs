@@ -82,6 +82,19 @@ pub enum PresenceStatus {
     Offline,
 }
 
+/// The declared presence an account chooses for itself. Distinct from
+/// `PresenceStatus` (socket connectivity): `online|offline` is whether you
+/// hold a gateway connection, `online|idle|dnd|invisible` is what you tell
+/// others you are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeclaredStatus {
+    Online,
+    Idle,
+    Dnd,
+    Invisible,
+}
+
 /// M0 server->client events. Serializes to exactly
 /// `{ "type": "...", "data": { ... } }` via adjacent tagging.
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +115,11 @@ pub enum ServerEvent {
     PresenceUpdate {
         account_id: Uuid,
         status: PresenceStatus,
+    },
+    #[serde(rename = "presence.status_update")]
+    PresenceStatusUpdate {
+        account_id: Uuid,
+        status: DeclaredStatus,
     },
     /// The full roster of a voice channel, sent to an account the moment it
     /// joins. A mesh client needs to know who is already there so it can open

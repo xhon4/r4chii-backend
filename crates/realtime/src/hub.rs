@@ -11,7 +11,9 @@ use app_core::Uuid;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::error::RealtimeError;
-use crate::event::{MemberLeaveReason, MessagePayload, PresenceStatus, RolePayload, ServerEvent};
+use crate::event::{
+    DeclaredStatus, MemberLeaveReason, MessagePayload, PresenceStatus, RolePayload, ServerEvent,
+};
 
 /// Opaque per-connection identity, distinct from `account_id`: an account
 /// can have more than one live connection (web + desktop open at once), so
@@ -674,6 +676,35 @@ impl Hub {
         self.send_to(
             &account_ids,
             &ServerEvent::PresenceUpdate { account_id, status },
+        )
+        .await;
+    }
+
+    /// Fans a declared status change to the same observers as `publish_presence`.
+    /// Reuses `presence_observer_account_ids` so the two presence axes share
+    /// exactly one authorization set. Best-effort and infallible for the same
+    /// reasons: a failed lookup must not fail the HTTP request that just wrote
+    /// the new status (the row is already durably saved), and no replay buffer
+    /// exists to recover a dropped frame — the next profile fetch reconciles it.
+    pub async fn publish_declared_status(&self, account_id: Uuid, status: DeclaredStatus) {
+        let mut account_ids = match self
+            .inner
+            .domain
+            .presence_observer_account_ids(account_id)
+            .await
+        {
+            Ok(account_ids) => account_ids,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to resolve presence.status_update recipients");
+                return;
+            }
+        };
+
+        account_ids.retain(|recipient| *recipient != account_id);
+
+        self.send_to(
+            &account_ids,
+            &ServerEvent::PresenceStatusUpdate { account_id, status },
         )
         .await;
     }
