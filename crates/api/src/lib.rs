@@ -200,6 +200,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/servers/{id}/channels",
             get(handlers::list_channels),
         )
+        .route(
+            "/api/v1/servers/{id}/channels/{channel_id}",
+            delete(handlers::delete_channel),
+        )
         .route("/api/v1/servers/{id}/members", get(handlers::list_members))
         // ---- search ----
         .route(

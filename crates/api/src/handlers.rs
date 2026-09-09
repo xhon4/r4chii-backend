@@ -24,9 +24,9 @@ use crate::{
         ProfileSummaryResponse, RegisterRequest, ReorderRolesRequest, ResendCodeRequest,
         RoleResponse, SendFriendRequestRequest, SendMessageRequest, ServerMemberResponse,
         ServerResponse, SessionResponse, SetChannelRolePermissionRequest, SetMemberRolesRequest,
-        SetSpacesOrderRequest, TimeoutRequest, UpdateAccountRequest, UpdateChannelRestrictedRequest,
-        UpdateChannelVisibilityRequest, UpdateNicknameRequest, UpdateRoleRequest,
-        UpdateServerVisibilityRequest, VerifyRegistrationRequest,
+        SetSpacesOrderRequest, TimeoutRequest, UpdateAccountRequest,
+        UpdateChannelRestrictedRequest, UpdateChannelVisibilityRequest, UpdateNicknameRequest,
+        UpdateRoleRequest, UpdateServerVisibilityRequest, VerifyRegistrationRequest,
     },
     error::ApiError,
     extract::{AuthenticatedUser, SESSION_COOKIE_NAME},
@@ -393,6 +393,18 @@ pub async fn list_channels(
         items: channels.into_iter().map(Into::into).collect(),
         next_cursor: None,
     }))
+}
+
+pub async fn delete_channel(
+    State(state): State<AppState>,
+    AuthenticatedUser(context): AuthenticatedUser,
+    Path((server_id, channel_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .domain
+        .delete_channel(context.account_id, server_id, channel_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Full-text search across a server's messages, gated at server

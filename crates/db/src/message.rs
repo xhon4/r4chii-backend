@@ -238,6 +238,8 @@ pub async fn search_in_server(
          JOIN channel c ON c.id = m.channel_id \
          LEFT JOIN channel parent ON parent.id = c.parent_channel_id \
          WHERE c.server_id = $1 \
+         AND c.deleted_at IS NULL \
+         AND (c.parent_channel_id IS NULL OR parent.deleted_at IS NULL) \
          AND m.deleted_at IS NULL \
          AND m.search_vector @@ websearch_to_tsquery('english', $2) \
          AND ($3::uuid IS NULL OR m.author_account_id = $3) \

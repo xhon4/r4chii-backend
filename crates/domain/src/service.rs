@@ -50,6 +50,44 @@ fn visibility_rank(visibility: &str) -> u8 {
     }
 }
 
+/// Applies containment at one level: an absent override inherits, while a
+/// broader override is capped by the enclosing visibility.
+fn contained_visibility<'a>(
+    override_visibility: Option<&'a str>,
+    parent_visibility: &'a str,
+) -> &'a str {
+    match override_visibility {
+        Some(value) if visibility_rank(value) <= visibility_rank(parent_visibility) => value,
+        _ => parent_visibility,
+    }
+}
+
+/// The single containment calculation shared by live anonymous reads and the
+/// deletion snapshot. A thread is capped by its parent, then by its server.
+fn effective_visibility<'a>(
+    channel_visibility: Option<&'a str>,
+    parent_visibility: Option<&'a str>,
+    server_visibility: &'a str,
+) -> &'a str {
+    let parent_effective = contained_visibility(parent_visibility, server_visibility);
+    contained_visibility(channel_visibility, parent_effective)
+}
+
+fn public_tombstone_eligible(
+    channel: &db::channel::LifecycleChannelRow,
+    parent: Option<&db::channel::LifecycleChannelRow>,
+    server_visibility: &str,
+) -> bool {
+    channel.kind == "thread"
+        && !channel.restricted
+        && !parent.is_some_and(|parent| parent.restricted)
+        && effective_visibility(
+            channel.visibility.as_deref(),
+            parent.and_then(|parent| parent.visibility.as_deref()),
+            server_visibility,
+        ) == "public"
+}
+
 /// Default page size for `list_messages` when the caller omits `limit` — 50
 /// matches the API's own cursor pagination convention (not spec-pinned as a
 /// hard default, but chosen to match it).
@@ -360,8 +398,7 @@ impl DomainService {
             )
             .await?;
         }
-        db::server::clear_spaces_position_except(&mut *tx, account_id, &ordered_server_ids)
-            .await?;
+        db::server::clear_spaces_position_except(&mut *tx, account_id, &ordered_server_ids).await?;
         tx.commit().await?;
 
         let rows = db::server::list_for_account(&self.pool, account_id).await?;
@@ -676,6 +713,72 @@ impl DomainService {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    /// Soft-deletes one server channel or thread. Snapshot and deletion share
+    /// a transaction whose locks serialize parent, child, and server-visibility
+    /// mutations; child rows retain their `deleted_at` when a parent is removed.
+    pub async fn delete_channel(
+        &self,
+        account_id: Uuid,
+        server_id: Uuid,
+        channel_id: Uuid,
+    ) -> Result<(), DomainError> {
+        self.require_permission(account_id, server_id, permissions::MANAGE_CHANNELS)
+            .await?;
+
+        // Parentage is immutable; this pre-read lets a direct child deletion
+        // acquire locks in the same server -> parent -> child order as a
+        // parent deletion, avoiding a lock-order cycle.
+        let parent_id =
+            db::channel::parent_id_for_server(&self.pool, channel_id, server_id).await?;
+        let mut tx = self.pool.begin().await?;
+        let server_visibility = db::channel::lock_server_visibility(&mut *tx, server_id)
+            .await?
+            .ok_or(DomainError::ChannelNotFound)?;
+        let parent = match parent_id {
+            Some(parent_id) => Some(
+                db::channel::lock_live_channel(&mut *tx, parent_id, server_id)
+                    .await?
+                    .ok_or(DomainError::ChannelNotFound)?,
+            ),
+            None => None,
+        };
+        let target = db::channel::lock_live_channel(&mut *tx, channel_id, server_id)
+            .await?
+            .ok_or(DomainError::ChannelNotFound)?;
+        if target.parent_channel_id != parent_id {
+            return Err(DomainError::ChannelNotFound);
+        }
+
+        // This runs after the locks: the common live-access resolver sees the
+        // same target/parent restriction state the snapshot records.
+        self.require_channel_access(account_id, channel_id).await?;
+
+        db::channel::snapshot_tombstone_eligibility(
+            &mut *tx,
+            target.id,
+            public_tombstone_eligible(&target, parent.as_ref(), &server_visibility),
+        )
+        .await?;
+
+        if target.parent_channel_id.is_none() {
+            let descendants = db::channel::lock_descendant_threads(&mut *tx, target.id).await?;
+            for descendant in descendants {
+                db::channel::snapshot_tombstone_eligibility(
+                    &mut *tx,
+                    descendant.id,
+                    public_tombstone_eligible(&descendant, Some(&target), &server_visibility),
+                )
+                .await?;
+            }
+        }
+
+        if !db::channel::soft_delete(&mut *tx, channel_id, server_id).await? {
+            return Err(DomainError::ChannelNotFound);
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Sets (or clears, via `visibility: None`) a channel's visibility
     /// override. Gated on `MANAGE_VISIBILITY`; an override may
     /// never rank BROADER than the server's own visibility — a private
@@ -883,16 +986,14 @@ impl DomainService {
 
         let server_id = ctx.server_id.ok_or(DomainError::ChannelNotFound)?;
         let server_visibility = ctx.server_visibility.ok_or(DomainError::ChannelNotFound)?;
-        // The write-time ceiling in `update_channel_visibility` is re-applied
-        // here: flipping a server to `private` leaves any broader channel
-        // override in place, so a stale override must never outrank its
-        // server's own visibility.
-        let effective = match ctx.channel_visibility {
-            Some(channel) if visibility_rank(&channel) <= visibility_rank(&server_visibility) => {
-                channel
-            }
-            _ => server_visibility,
-        };
+        // The write-time ceiling is re-applied here: flipping a server to
+        // `private` leaves broader stored overrides in place, but never lets
+        // them outrank the server or a thread's parent.
+        let effective = effective_visibility(
+            ctx.channel_visibility.as_deref(),
+            ctx.parent_channel_visibility.as_deref(),
+            &server_visibility,
+        );
 
         if ctx.restricted {
             let Some(account_id) = actor else {
@@ -917,7 +1018,7 @@ impl DomainService {
             }
         }
 
-        match effective.as_str() {
+        match effective {
             "public" | "unlisted" => Ok(ReadAccess::Public),
             // Includes an unrecognized value, which should be unreachable
             // given the column's CHECK constraint and `validate_visibility`
@@ -941,7 +1042,14 @@ impl DomainService {
         thread_id: Uuid,
         after: Option<Uuid>,
     ) -> Result<(ChannelSummary, Vec<PublicMessageSummary>), DomainError> {
-        self.resolve_read_access(None, thread_id).await?;
+        if let Err(error) = self.resolve_read_access(None, thread_id).await {
+            if matches!(error, DomainError::ChannelNotFound)
+                && db::channel::has_public_thread_tombstone(&self.pool, thread_id).await?
+            {
+                return Err(DomainError::ThreadGone);
+            }
+            return Err(error);
+        }
 
         let thread = db::channel::find_thread(&self.pool, thread_id)
             .await?
@@ -975,14 +1083,20 @@ impl DomainService {
     /// against.
     pub async fn list_public_threads(&self) -> Result<Vec<SitemapThread>, DomainError> {
         let rows = db::channel::list_public_threads(&self.pool).await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| SitemapThread {
-                id: row.id,
-                slug: row.slug,
-                created_at: row.created_at,
-            })
-            .collect())
+        let mut threads = Vec::new();
+        for row in rows {
+            if matches!(
+                self.resolve_read_access(None, row.id).await,
+                Ok(ReadAccess::Public)
+            ) {
+                threads.push(SitemapThread {
+                    id: row.id,
+                    slug: row.slug,
+                    created_at: row.created_at,
+                });
+            }
+        }
+        Ok(threads)
     }
 
     /// Gets or creates the 1:1 `dm` channel between `account_id` and

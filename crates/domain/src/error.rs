@@ -30,6 +30,11 @@ pub enum DomainError {
     #[error("channel not found")]
     ChannelNotFound,
 
+    /// A historically public thread was deleted directly or became unreachable
+    /// through a deleted parent. Only the public archive maps this to 410.
+    #[error("thread gone")]
+    ThreadGone,
+
     /// No `message` row exists with this id in this channel — either it was
     /// never there, or it belongs to a different channel (deliberately the
     /// same shape, a channel-scoped lookup never confirms cross-channel

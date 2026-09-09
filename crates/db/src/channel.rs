@@ -46,6 +46,7 @@ pub struct VisibilityContextRow {
     pub server_id: Option<Uuid>,
     pub kind: String,
     pub channel_visibility: Option<String>,
+    pub parent_channel_visibility: Option<String>,
     pub server_visibility: Option<String>,
     /// EFFECTIVE — a thread's PARENT's `restricted` value, not its
     /// own (always `false`) unused column. `false` for `dm`/`group_dm`.
@@ -108,7 +109,8 @@ pub async fn count_by_server(
     server_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT COUNT(*) FROM channel WHERE server_id = $1 AND kind IN ('text', 'voice')",
+        "SELECT COUNT(*) FROM channel \
+         WHERE server_id = $1 AND kind IN ('text', 'voice') AND deleted_at IS NULL",
     )
     .bind(server_id)
     .fetch_one(executor)
@@ -120,9 +122,13 @@ pub async fn list_by_server(
     server_id: Uuid,
 ) -> Result<Vec<ChannelRow>, sqlx::Error> {
     sqlx::query_as::<_, ChannelRow>(
-        "SELECT id, server_id, kind, name, created_at, visibility, \
-                parent_channel_id, root_message_id, title, slug, restricted \
-         FROM channel WHERE server_id = $1 ORDER BY created_at ASC",
+        "SELECT c.id, c.server_id, c.kind, c.name, c.created_at, c.visibility, \
+                c.parent_channel_id, c.root_message_id, c.title, c.slug, c.restricted \
+         FROM channel c \
+         LEFT JOIN channel parent ON parent.id = c.parent_channel_id \
+         WHERE c.server_id = $1 AND c.deleted_at IS NULL \
+         AND (c.parent_channel_id IS NULL OR parent.deleted_at IS NULL) \
+         ORDER BY c.position ASC NULLS LAST, c.created_at ASC",
     )
     .bind(server_id)
     .fetch_all(executor)
@@ -170,7 +176,7 @@ pub async fn list_threads_by_parent(
     sqlx::query_as::<_, ChannelRow>(
         "SELECT id, server_id, kind, name, created_at, visibility, \
                 parent_channel_id, root_message_id, title, slug, restricted \
-         FROM channel WHERE parent_channel_id = $1 AND kind = 'thread' \
+         FROM channel WHERE parent_channel_id = $1 AND kind = 'thread' AND deleted_at IS NULL \
          ORDER BY created_at DESC",
     )
     .bind(parent_channel_id)
@@ -190,10 +196,12 @@ pub async fn list_threads_by_parents(
         return Ok(Vec::new());
     }
     sqlx::query_as::<_, ChannelRow>(
-        "SELECT id, server_id, kind, name, created_at, visibility, \
-                parent_channel_id, root_message_id, title, slug, restricted \
-         FROM channel WHERE parent_channel_id = ANY($1) AND kind = 'thread' \
-         ORDER BY parent_channel_id, created_at DESC",
+        "SELECT c.id, c.server_id, c.kind, c.name, c.created_at, c.visibility, \
+                c.parent_channel_id, c.root_message_id, c.title, c.slug, c.restricted \
+         FROM channel c JOIN channel parent ON parent.id = c.parent_channel_id \
+         WHERE c.parent_channel_id = ANY($1) AND c.kind = 'thread' \
+         AND c.deleted_at IS NULL AND parent.deleted_at IS NULL \
+         ORDER BY c.parent_channel_id, c.created_at DESC",
     )
     .bind(parent_channel_ids)
     .fetch_all(executor)
@@ -209,13 +217,138 @@ pub async fn find_thread(
     thread_id: Uuid,
 ) -> Result<Option<ChannelRow>, sqlx::Error> {
     sqlx::query_as::<_, ChannelRow>(
-        "SELECT id, server_id, kind, name, created_at, visibility, \
-                parent_channel_id, root_message_id, title, slug, restricted \
-         FROM channel WHERE id = $1 AND kind = 'thread'",
+        "SELECT c.id, c.server_id, c.kind, c.name, c.created_at, c.visibility, \
+                c.parent_channel_id, c.root_message_id, c.title, c.slug, c.restricted \
+         FROM channel c JOIN channel parent ON parent.id = c.parent_channel_id \
+         WHERE c.id = $1 AND c.kind = 'thread' \
+         AND c.deleted_at IS NULL AND parent.deleted_at IS NULL",
     )
     .bind(thread_id)
     .fetch_optional(executor)
     .await
+}
+
+/// Retained tombstone metadata is intentionally queried separately from live
+/// thread access: only an immutable historical `true` may reveal a 410.
+pub async fn has_public_thread_tombstone(
+    executor: impl PgExecutor<'_>,
+    thread_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM channel c \
+         LEFT JOIN channel parent ON parent.id = c.parent_channel_id \
+         WHERE c.id = $1 AND c.kind = 'thread' \
+         AND c.public_tombstone_eligible = true \
+         AND (c.deleted_at IS NOT NULL OR parent.deleted_at IS NOT NULL))",
+    )
+    .bind(thread_id)
+    .fetch_one(executor)
+    .await
+}
+
+/// The mutable facts captured under the lifecycle transaction's row locks.
+#[derive(sqlx::FromRow)]
+pub struct LifecycleChannelRow {
+    pub id: Uuid,
+    pub server_id: Option<Uuid>,
+    pub kind: String,
+    pub visibility: Option<String>,
+    pub restricted: bool,
+    pub parent_channel_id: Option<Uuid>,
+}
+
+/// Reads the immutable parent relationship before locks are taken. Channel
+/// parentage has no update path; liveness is checked again by the lock query.
+pub async fn parent_id_for_server(
+    executor: impl PgExecutor<'_>,
+    channel_id: Uuid,
+    server_id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar("SELECT parent_channel_id FROM channel WHERE id = $1 AND server_id = $2")
+        .bind(channel_id)
+        .bind(server_id)
+        .fetch_optional(executor)
+        .await
+        .map(|parent| parent.flatten())
+}
+
+/// Serializes lifecycle snapshots with server-visibility changes.
+pub async fn lock_server_visibility(
+    executor: impl PgExecutor<'_>,
+    server_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT visibility FROM server WHERE id = $1 FOR UPDATE")
+        .bind(server_id)
+        .fetch_optional(executor)
+        .await
+}
+
+/// Locks one live server channel. Parent rows are locked first by the caller,
+/// preserving the parent-before-descendant order used for parent deletion.
+pub async fn lock_live_channel(
+    executor: impl PgExecutor<'_>,
+    channel_id: Uuid,
+    server_id: Uuid,
+) -> Result<Option<LifecycleChannelRow>, sqlx::Error> {
+    sqlx::query_as::<_, LifecycleChannelRow>(
+        "SELECT id, server_id, kind, visibility, restricted, parent_channel_id \
+         FROM channel WHERE id = $1 AND server_id = $2 AND deleted_at IS NULL \
+         FOR UPDATE",
+    )
+    .bind(channel_id)
+    .bind(server_id)
+    .fetch_optional(executor)
+    .await
+}
+
+/// Locks every child thread while its parent is already locked, so a direct
+/// child deletion and an ancestor deletion cannot overwrite a first snapshot.
+pub async fn lock_descendant_threads(
+    executor: impl PgExecutor<'_>,
+    parent_channel_id: Uuid,
+) -> Result<Vec<LifecycleChannelRow>, sqlx::Error> {
+    sqlx::query_as::<_, LifecycleChannelRow>(
+        "SELECT id, server_id, kind, visibility, restricted, parent_channel_id \
+         FROM channel WHERE parent_channel_id = $1 AND kind = 'thread' \
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(parent_channel_id)
+    .fetch_all(executor)
+    .await
+}
+
+/// Records a decision only once; subsequent direct/ancestor lifecycle writes
+/// preserve the first historical state.
+pub async fn snapshot_tombstone_eligibility(
+    executor: impl PgExecutor<'_>,
+    channel_id: Uuid,
+    eligible: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE channel SET public_tombstone_eligible = $2 \
+         WHERE id = $1 AND public_tombstone_eligible IS NULL",
+    )
+    .bind(channel_id)
+    .bind(eligible)
+    .execute(executor)
+    .await
+    .map(|_| ())
+}
+
+pub async fn soft_delete(
+    executor: impl PgExecutor<'_>,
+    channel_id: Uuid,
+    server_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE channel SET deleted_at = now() \
+         WHERE id = $1 AND server_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(channel_id)
+    .bind(server_id)
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 /// One row of the public sitemap: every thread whose EFFECTIVE
@@ -234,17 +367,9 @@ pub async fn list_public_threads(
 ) -> Result<Vec<SitemapThreadRow>, sqlx::Error> {
     sqlx::query_as::<_, SitemapThreadRow>(
         "SELECT c.id, c.slug, c.created_at \
-         FROM channel c \
-         JOIN server s ON s.id = c.server_id \
-         JOIN channel parent ON parent.id = c.parent_channel_id \
-         WHERE c.kind = 'thread' \
-         AND coalesce(c.visibility, s.visibility) = 'public' \
-         AND c.slug IS NOT NULL \
-         -- A restricted parent channel's threads are never
-         -- publicly readable regardless of their own visibility override
-         -- (resolve_read_access enforces the same rule) — excluded from the
-         -- sitemap for the same reason, not just from the read path itself.
-         AND NOT parent.restricted \
+         FROM channel c JOIN channel parent ON parent.id = c.parent_channel_id \
+         WHERE c.kind = 'thread' AND c.slug IS NOT NULL \
+         AND c.deleted_at IS NULL AND parent.deleted_at IS NULL \
          ORDER BY c.created_at DESC",
     )
     .fetch_all(executor)
@@ -278,13 +403,15 @@ pub async fn visibility_context(
 ) -> Result<Option<VisibilityContextRow>, sqlx::Error> {
     sqlx::query_as::<_, VisibilityContextRow>(
         "SELECT c.server_id, c.kind, c.visibility AS channel_visibility, \
+                parent.visibility AS parent_channel_visibility, \
                 s.visibility AS server_visibility, \
-                coalesce(parent.restricted, c.restricted) AS restricted, \
+                c.restricted OR coalesce(parent.restricted, false) AS restricted, \
                 c.parent_channel_id \
          FROM channel c \
          LEFT JOIN server s ON s.id = c.server_id \
          LEFT JOIN channel parent ON parent.id = c.parent_channel_id \
-         WHERE c.id = $1",
+         WHERE c.id = $1 AND c.deleted_at IS NULL \
+         AND (c.parent_channel_id IS NULL OR parent.deleted_at IS NULL)",
     )
     .bind(channel_id)
     .fetch_optional(executor)
@@ -305,7 +432,7 @@ pub async fn update_visibility(
 ) -> Result<Option<ChannelRow>, sqlx::Error> {
     sqlx::query_as::<_, ChannelRow>(
         "UPDATE channel SET visibility = $1 \
-         WHERE id = $2 AND server_id = $3 \
+         WHERE id = $2 AND server_id = $3 AND deleted_at IS NULL \
          RETURNING id, server_id, kind, name, created_at, visibility, \
                    parent_channel_id, root_message_id, title, slug, restricted",
     )
@@ -322,11 +449,12 @@ pub async fn find_access_by_id(
 ) -> Result<Option<ChannelAccessRow>, sqlx::Error> {
     sqlx::query_as::<_, ChannelAccessRow>(
         "SELECT c.server_id, c.kind, \
-                coalesce(parent.restricted, c.restricted) AS restricted, \
+                c.restricted OR coalesce(parent.restricted, false) AS restricted, \
                 c.parent_channel_id \
          FROM channel c \
          LEFT JOIN channel parent ON parent.id = c.parent_channel_id \
-         WHERE c.id = $1",
+         WHERE c.id = $1 AND c.deleted_at IS NULL \
+         AND (c.parent_channel_id IS NULL OR parent.deleted_at IS NULL)",
     )
     .bind(channel_id)
     .fetch_optional(executor)
@@ -346,7 +474,7 @@ pub async fn set_channel_restricted(
 ) -> Result<Option<ChannelRow>, sqlx::Error> {
     sqlx::query_as::<_, ChannelRow>(
         "UPDATE channel SET restricted = $1 \
-         WHERE id = $2 AND server_id = $3 \
+         WHERE id = $2 AND server_id = $3 AND deleted_at IS NULL \
          RETURNING id, server_id, kind, name, created_at, visibility, \
                    parent_channel_id, root_message_id, title, slug, restricted",
     )
@@ -652,9 +780,14 @@ pub async fn accessible_channel_ids(
     sqlx::query_scalar::<_, Uuid>(
         "SELECT c.id FROM channel c \
          JOIN membership m ON m.server_id = c.server_id \
+         LEFT JOIN channel parent ON parent.id = c.parent_channel_id \
          WHERE c.kind IN ('text','voice','thread') AND m.account_id = $1 \
+         AND c.deleted_at IS NULL \
+         AND (c.parent_channel_id IS NULL OR parent.deleted_at IS NULL) \
          UNION \
-         SELECT cm.channel_id FROM channel_member cm WHERE cm.account_id = $1",
+         SELECT cm.channel_id FROM channel_member cm \
+         JOIN channel c ON c.id = cm.channel_id \
+         WHERE cm.account_id = $1 AND c.deleted_at IS NULL",
     )
     .bind(account_id)
     .fetch_all(executor)

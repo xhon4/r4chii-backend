@@ -53,18 +53,22 @@ struct ThreadTemplate {
 #[template(path = "not_found.html")]
 struct NotFoundTemplate;
 
-/// Renders `not_found.html` at 404 — the one response shape for "deleted",
-/// "de-listed", "never existed", or "not actually a thread" — these must
-/// be indistinguishable to an anonymous caller. This project has
-/// no thread-delete feature yet (no `deleted_at`/tombstone concept on
-/// `channel` at all), so the intended 410-for-deleted / 404-for-de-listed
-/// split has nothing to switch on today — deferred until a
-/// delete-thread action exists to actually produce that first case.
+#[derive(Template)]
+#[template(path = "gone.html")]
+struct GoneTemplate;
+
 fn not_found() -> Response {
     let body = NotFoundTemplate
         .render()
         .unwrap_or_else(|_| "Not found".to_string());
     (StatusCode::NOT_FOUND, Html(body)).into_response()
+}
+
+fn gone() -> Response {
+    let body = GoneTemplate
+        .render()
+        .unwrap_or_else(|_| "This thread was removed".to_string());
+    (StatusCode::GONE, Html(body)).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,9 +85,10 @@ async fn thread_page(
         return not_found();
     };
 
-    let Ok((thread, messages)) = state.domain.get_public_thread(thread_id, query.after).await
-    else {
-        return not_found();
+    let (thread, messages) = match state.domain.get_public_thread(thread_id, query.after).await {
+        Ok(result) => result,
+        Err(domain::DomainError::ThreadGone) => return gone(),
+        Err(_) => return not_found(),
     };
 
     let title = thread

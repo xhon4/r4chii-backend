@@ -164,6 +164,9 @@ impl From<domain::DomainError> for ApiError {
             domain::DomainError::ChannelNotFound => {
                 ApiError::new(StatusCode::NOT_FOUND, "channel_not_found", err.to_string())
             }
+            domain::DomainError::ThreadGone => {
+                ApiError::new(StatusCode::GONE, "thread_gone", err.to_string())
+            }
             domain::DomainError::MessageNotFound => {
                 ApiError::new(StatusCode::NOT_FOUND, "message_not_found", err.to_string())
             }
@@ -405,6 +408,13 @@ mod tests {
         let api_err: ApiError = domain::DomainError::ChannelNotFound.into();
         assert_eq!(api_err.status(), StatusCode::NOT_FOUND);
         assert_eq!(api_err.code(), "channel_not_found");
+    }
+
+    #[test]
+    fn thread_gone_maps_to_410() {
+        let api_err: ApiError = domain::DomainError::ThreadGone.into();
+        assert_eq!(api_err.status(), StatusCode::GONE);
+        assert_eq!(api_err.code(), "thread_gone");
     }
 
     #[test]
