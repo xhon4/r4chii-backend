@@ -1391,15 +1391,34 @@ impl DomainService {
         Ok((thread.into(), messages))
     }
 
-    /// Every publicly-visible thread, newest first — the sitemap's source of
-    /// truth. No caller/authorization to check: this only ever
-    /// returns what is already public, the same set an anonymous
-    /// `get_public_thread` call on any of these ids would already succeed
-    /// against.
+    /// Every listable thread, newest first — the sitemap's source of truth.
+    /// No caller/authorization to check: nothing here is narrower than
+    /// public.
+    ///
+    /// Listability is stricter than anonymous readability. An `unlisted`
+    /// thread reads fine for anyone holding its link, so it resolves as
+    /// `ReadAccess::Public`, but publishing it in the sitemap is exactly what
+    /// `unlisted` exists to prevent. Effective visibility must therefore be
+    /// `public` outright, on top of the read-access check that still gates
+    /// restricted channels.
     pub async fn list_public_threads(&self) -> Result<Vec<SitemapThread>, DomainError> {
         let rows = db::channel::list_public_threads(&self.pool).await?;
         let mut threads = Vec::new();
         for row in rows {
+            let Some(ctx) = db::channel::visibility_context(&self.pool, row.id).await? else {
+                continue;
+            };
+            let Some(server_visibility) = ctx.server_visibility.as_deref() else {
+                continue;
+            };
+            if effective_visibility(
+                ctx.channel_visibility.as_deref(),
+                ctx.parent_channel_visibility.as_deref(),
+                server_visibility,
+            ) != "public"
+            {
+                continue;
+            }
             if matches!(
                 self.resolve_read_access(None, row.id).await,
                 Ok(ReadAccess::Public)
