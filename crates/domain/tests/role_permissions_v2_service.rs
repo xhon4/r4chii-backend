@@ -18,7 +18,10 @@ async fn create_server(domain: &DomainService, owner: Uuid, name: &str) -> Serve
     domain
         .create_server(
             owner,
-            CreateServerInput { name: name.to_string(), visibility: None },
+            CreateServerInput {
+                name: name.to_string(),
+                visibility: None,
+            },
         )
         .await
         .expect("create_server succeeds")
@@ -29,7 +32,10 @@ async fn create_channel(domain: &DomainService, owner: Uuid, server_id: Uuid) ->
         .create_channel(
             owner,
             server_id,
-            CreateChannelInput { name: "general".to_string(), kind: None },
+            CreateChannelInput {
+                name: "general".to_string(),
+                kind: None,
+            },
         )
         .await
         .expect("create_channel succeeds")
@@ -47,7 +53,13 @@ async fn grant_role(
     bits: i64,
 ) -> Uuid {
     let role = domain
-        .create_role(owner, server_id, CreateRoleInput { name: name.to_string() })
+        .create_role(
+            owner,
+            server_id,
+            CreateRoleInput {
+                name: name.to_string(),
+            },
+        )
         .await
         .expect("create_role succeeds");
     domain
@@ -90,7 +102,15 @@ async fn a_member_with_timeout_members_can_time_out_a_plain_member() {
     let server = create_server(&domain, owner, "Server").await;
     join(&domain, mod_account, server.invite_code.as_ref().unwrap()).await;
     join(&domain, target, server.invite_code.as_ref().unwrap()).await;
-    grant_role(&domain, owner, server.id, mod_account, "Mod", permissions::TIMEOUT_MEMBERS).await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        mod_account,
+        "Mod",
+        permissions::TIMEOUT_MEMBERS,
+    )
+    .await;
 
     let until = Utc::now() + Duration::hours(1);
     domain
@@ -98,7 +118,10 @@ async fn a_member_with_timeout_members_can_time_out_a_plain_member() {
             mod_account,
             server.id,
             target,
-            TimeoutInput { until, reason: Some("spamming".to_string()) },
+            TimeoutInput {
+                until,
+                reason: Some("spamming".to_string()),
+            },
         )
         .await
         .expect("timeout_member succeeds");
@@ -106,7 +129,13 @@ async fn a_member_with_timeout_members_can_time_out_a_plain_member() {
     // A timed-out member cannot post...
     let channel = create_channel(&domain, owner, server.id).await;
     let send = domain
-        .send_message(target, channel.id, SendMessageInput { content: "hi".to_string() })
+        .send_message(
+            target,
+            channel.id,
+            SendMessageInput {
+                content: "hi".to_string(),
+            },
+        )
         .await;
     assert!(matches!(send, Err(DomainError::MemberTimedOut)));
 
@@ -132,7 +161,10 @@ async fn a_plain_member_without_timeout_members_cannot_time_out_anyone() {
             plain,
             server.id,
             target,
-            TimeoutInput { until: Utc::now() + Duration::hours(1), reason: None },
+            TimeoutInput {
+                until: Utc::now() + Duration::hours(1),
+                reason: None,
+            },
         )
         .await;
     assert!(matches!(result, Err(DomainError::MissingPermission)));
@@ -152,7 +184,15 @@ async fn timeout_rejects_a_target_whose_role_outranks_the_actors() {
     // Created second, so it starts at a HIGHER position than the first role
     // (new roles start above every existing one) — gives the target's role
     // real outranking authority.
-    grant_role(&domain, owner, server.id, low_mod, "Low Mod", permissions::TIMEOUT_MEMBERS).await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        low_mod,
+        "Low Mod",
+        permissions::TIMEOUT_MEMBERS,
+    )
+    .await;
     grant_role(&domain, owner, server.id, high_target, "High Rank", 0).await;
 
     let result = domain
@@ -160,7 +200,10 @@ async fn timeout_rejects_a_target_whose_role_outranks_the_actors() {
             low_mod,
             server.id,
             high_target,
-            TimeoutInput { until: Utc::now() + Duration::hours(1), reason: None },
+            TimeoutInput {
+                until: Utc::now() + Duration::hours(1),
+                reason: None,
+            },
         )
         .await;
     assert!(matches!(result, Err(DomainError::InsufficientHierarchy)));
@@ -174,16 +217,40 @@ async fn timeout_rejects_targeting_the_owner_or_yourself() {
 
     let server = create_server(&domain, owner, "Server4").await;
     join(&domain, mod_account, server.invite_code.as_ref().unwrap()).await;
-    grant_role(&domain, owner, server.id, mod_account, "Mod", permissions::TIMEOUT_MEMBERS).await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        mod_account,
+        "Mod",
+        permissions::TIMEOUT_MEMBERS,
+    )
+    .await;
 
     let until = Utc::now() + Duration::hours(1);
     let self_result = domain
-        .timeout_member(mod_account, server.id, mod_account, TimeoutInput { until, reason: None })
+        .timeout_member(
+            mod_account,
+            server.id,
+            mod_account,
+            TimeoutInput {
+                until,
+                reason: None,
+            },
+        )
         .await;
     assert!(matches!(self_result, Err(DomainError::CannotActOnSelf)));
 
     let owner_result = domain
-        .timeout_member(mod_account, server.id, owner, TimeoutInput { until, reason: None })
+        .timeout_member(
+            mod_account,
+            server.id,
+            owner,
+            TimeoutInput {
+                until,
+                reason: None,
+            },
+        )
         .await;
     assert!(matches!(owner_result, Err(DomainError::CannotActOnOwner)));
 }
@@ -202,7 +269,10 @@ async fn timeout_rejects_a_past_timestamp() {
             owner,
             server.id,
             target,
-            TimeoutInput { until: Utc::now() - Duration::hours(1), reason: None },
+            TimeoutInput {
+                until: Utc::now() - Duration::hours(1),
+                reason: None,
+            },
         )
         .await;
     assert!(matches!(result, Err(DomainError::Validation(_))));
@@ -223,7 +293,10 @@ async fn clear_timeout_lets_a_member_post_again() {
             owner,
             server.id,
             target,
-            TimeoutInput { until: Utc::now() + Duration::hours(1), reason: None },
+            TimeoutInput {
+                until: Utc::now() + Duration::hours(1),
+                reason: None,
+            },
         )
         .await
         .expect("owner can time out via ADMIN-equivalent bypass");
@@ -234,9 +307,18 @@ async fn clear_timeout_lets_a_member_post_again() {
         .expect("clear_timeout succeeds");
 
     let send = domain
-        .send_message(target, channel.id, SendMessageInput { content: "back".to_string() })
+        .send_message(
+            target,
+            channel.id,
+            SendMessageInput {
+                content: "back".to_string(),
+            },
+        )
         .await;
-    assert!(send.is_ok(), "clearing the timeout must let the member post again");
+    assert!(
+        send.is_ok(),
+        "clearing the timeout must let the member post again"
+    );
 }
 
 // ---- delete-others'-message (MANAGE_MESSAGES) ----
@@ -251,11 +333,25 @@ async fn manage_messages_lets_a_moderator_delete_someone_elses_message() {
     let server = create_server(&domain, owner, "Server7").await;
     join(&domain, mod_account, server.invite_code.as_ref().unwrap()).await;
     join(&domain, author, server.invite_code.as_ref().unwrap()).await;
-    grant_role(&domain, owner, server.id, mod_account, "Mod", permissions::MANAGE_MESSAGES).await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        mod_account,
+        "Mod",
+        permissions::MANAGE_MESSAGES,
+    )
+    .await;
     let channel = create_channel(&domain, owner, server.id).await;
 
     let message = domain
-        .send_message(author, channel.id, SendMessageInput { content: "hello".to_string() })
+        .send_message(
+            author,
+            channel.id,
+            SendMessageInput {
+                content: "hello".to_string(),
+            },
+        )
         .await
         .expect("send_message succeeds");
 
@@ -274,9 +370,18 @@ async fn in_a_dm_a_non_author_still_gets_not_message_author_not_missing_permissi
     let alice = register(&auth, "alice18@example.com", "alice18").await;
     let bob = register(&auth, "bob18@example.com", "bob18").await;
 
-    let (dm, _created) = domain.create_dm(alice, bob).await.expect("create_dm succeeds");
+    let (dm, _created) = domain
+        .create_dm(alice, bob)
+        .await
+        .expect("create_dm succeeds");
     let message = domain
-        .send_message(alice, dm.id, SendMessageInput { content: "hi bob".to_string() })
+        .send_message(
+            alice,
+            dm.id,
+            SendMessageInput {
+                content: "hi bob".to_string(),
+            },
+        )
         .await
         .expect("send_message succeeds");
 
@@ -297,7 +402,13 @@ async fn without_manage_messages_a_member_cannot_delete_someone_elses_message() 
     let channel = create_channel(&domain, owner, server.id).await;
 
     let message = domain
-        .send_message(author, channel.id, SendMessageInput { content: "hello".to_string() })
+        .send_message(
+            author,
+            channel.id,
+            SendMessageInput {
+                content: "hello".to_string(),
+            },
+        )
         .await
         .expect("send_message succeeds");
 
@@ -317,11 +428,25 @@ async fn pin_messages_gates_pinning_but_anyone_with_channel_access_can_read_pins
     let server = create_server(&domain, owner, "Server9").await;
     join(&domain, pinner, server.invite_code.as_ref().unwrap()).await;
     join(&domain, plain, server.invite_code.as_ref().unwrap()).await;
-    grant_role(&domain, owner, server.id, pinner, "Pinner", permissions::PIN_MESSAGES).await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        pinner,
+        "Pinner",
+        permissions::PIN_MESSAGES,
+    )
+    .await;
     let channel = create_channel(&domain, owner, server.id).await;
 
     let message = domain
-        .send_message(owner, channel.id, SendMessageInput { content: "important".to_string() })
+        .send_message(
+            owner,
+            channel.id,
+            SendMessageInput {
+                content: "important".to_string(),
+            },
+        )
         .await
         .expect("send_message succeeds");
 
@@ -382,7 +507,15 @@ async fn manage_nicknames_gates_setting_someone_elses_and_respects_hierarchy() {
         .await;
     assert!(matches!(denied, Err(DomainError::MissingPermission)));
 
-    grant_role(&domain, owner, server.id, mod_account, "Mod", permissions::MANAGE_NICKNAMES).await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        mod_account,
+        "Mod",
+        permissions::MANAGE_NICKNAMES,
+    )
+    .await;
 
     domain
         .update_member_nickname(mod_account, server.id, plain, Some("Renamed".to_string()))
@@ -402,12 +535,26 @@ async fn get_server_hides_the_invite_code_from_a_plain_member_but_shows_it_to_ma
     let server = create_server(&domain, owner, "Server12").await;
     join(&domain, plain, server.invite_code.as_ref().unwrap()).await;
     join(&domain, inviter, server.invite_code.as_ref().unwrap()).await;
-    grant_role(&domain, owner, server.id, inviter, "Inviter", permissions::MANAGE_INVITES).await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        inviter,
+        "Inviter",
+        permissions::MANAGE_INVITES,
+    )
+    .await;
 
-    let as_plain = domain.get_server(plain, server.id).await.expect("get_server succeeds");
+    let as_plain = domain
+        .get_server(plain, server.id)
+        .await
+        .expect("get_server succeeds");
     assert!(as_plain.invite_code.is_none());
 
-    let as_inviter = domain.get_server(inviter, server.id).await.expect("get_server succeeds");
+    let as_inviter = domain
+        .get_server(inviter, server.id)
+        .await
+        .expect("get_server succeeds");
     assert!(as_inviter.invite_code.is_some());
 }
 
@@ -424,7 +571,9 @@ async fn regenerate_invite_code_invalidates_the_old_code_immediately() {
         .regenerate_invite_code(owner, server.id)
         .await
         .expect("owner can regenerate the invite code");
-    let new_code = updated.invite_code.expect("owner always sees the fresh code");
+    let new_code = updated
+        .invite_code
+        .expect("owner always sees the fresh code");
     assert_ne!(old_code, new_code);
 
     let old_join = domain.join_via_invite(joiner, &old_code).await;
@@ -462,7 +611,13 @@ async fn a_plain_member_cannot_send_an_at_everyone_message() {
     let channel = create_channel(&domain, owner, server.id).await;
 
     let result = domain
-        .send_message(plain, channel.id, SendMessageInput { content: "@everyone hi".to_string() })
+        .send_message(
+            plain,
+            channel.id,
+            SendMessageInput {
+                content: "@everyone hi".to_string(),
+            },
+        )
         .await;
     assert!(matches!(result, Err(DomainError::MentionNotAllowed)));
 }
@@ -475,12 +630,25 @@ async fn mention_everyone_grants_the_at_everyone_token() {
 
     let server = create_server(&domain, owner, "Server16").await;
     join(&domain, announcer, server.invite_code.as_ref().unwrap()).await;
-    grant_role(&domain, owner, server.id, announcer, "Announcer", permissions::MENTION_EVERYONE)
-        .await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        announcer,
+        "Announcer",
+        permissions::MENTION_EVERYONE,
+    )
+    .await;
     let channel = create_channel(&domain, owner, server.id).await;
 
     domain
-        .send_message(announcer, channel.id, SendMessageInput { content: "@everyone hi".to_string() })
+        .send_message(
+            announcer,
+            channel.id,
+            SendMessageInput {
+                content: "@everyone hi".to_string(),
+            },
+        )
         .await
         .expect("MENTION_EVERYONE holder may use @everyone");
 }
@@ -496,11 +664,23 @@ async fn a_non_mentionable_roles_slug_requires_mention_roles_but_a_mentionable_o
     let channel = create_channel(&domain, owner, server.id).await;
 
     let staff_role = domain
-        .create_role(owner, server.id, CreateRoleInput { name: "Staff".to_string() })
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "Staff".to_string(),
+            },
+        )
         .await
         .expect("create_role succeeds");
     let lfg_role = domain
-        .create_role(owner, server.id, CreateRoleInput { name: "LFG".to_string() })
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "LFG".to_string(),
+            },
+        )
         .await
         .expect("create_role succeeds");
     domain
@@ -508,27 +688,53 @@ async fn a_non_mentionable_roles_slug_requires_mention_roles_but_a_mentionable_o
             owner,
             server.id,
             lfg_role.id,
-            UpdateRoleInput { name: None, color: None, permissions: None, mentionable: Some(true) },
+            UpdateRoleInput {
+                name: None,
+                color: None,
+                permissions: None,
+                mentionable: Some(true),
+            },
         )
         .await
         .expect("update_role succeeds");
 
     let denied = domain
-        .send_message(plain, channel.id, SendMessageInput { content: "@staff help".to_string() })
+        .send_message(
+            plain,
+            channel.id,
+            SendMessageInput {
+                content: "@staff help".to_string(),
+            },
+        )
         .await;
     assert!(matches!(denied, Err(DomainError::MentionNotAllowed)));
 
     let allowed = domain
-        .send_message(plain, channel.id, SendMessageInput { content: "@lfg anyone?".to_string() })
+        .send_message(
+            plain,
+            channel.id,
+            SendMessageInput {
+                content: "@lfg anyone?".to_string(),
+            },
+        )
         .await;
     assert!(allowed.is_ok(), "a mentionable role's slug needs no bit");
 
     // A token matching nothing real is just text, never rejected.
     let _ = staff_role; // referenced above via slug "staff", kept for clarity
     let plain_text = domain
-        .send_message(plain, channel.id, SendMessageInput { content: "my email is a@b-c".to_string() })
+        .send_message(
+            plain,
+            channel.id,
+            SendMessageInput {
+                content: "my email is a@b-c".to_string(),
+            },
+        )
         .await;
-    assert!(plain_text.is_ok(), "a token matching no real role/reserved word is not a mention");
+    assert!(
+        plain_text.is_ok(),
+        "a token matching no real role/reserved word is not a mention"
+    );
 }
 
 // ---- reorder_roles ----
@@ -544,9 +750,23 @@ async fn reorder_roles_rejects_a_moderator_moving_their_own_role_above_a_higher_
 
     // Created first, so it starts BELOW the role created after it — gives
     // the moderator's own role less authority than "High".
-    let mod_role_id = grant_role(&domain, owner, server.id, mod_account, "Mod", permissions::MANAGE_ROLES).await;
+    let mod_role_id = grant_role(
+        &domain,
+        owner,
+        server.id,
+        mod_account,
+        "Mod",
+        permissions::MANAGE_ROLES,
+    )
+    .await;
     let high_role_id = domain
-        .create_role(owner, server.id, CreateRoleInput { name: "High".to_string() })
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "High".to_string(),
+            },
+        )
         .await
         .expect("create_role succeeds")
         .id;
@@ -568,7 +788,10 @@ async fn reorder_roles_rejects_a_moderator_moving_their_own_role_above_a_higher_
         .list_roles(owner, server.id)
         .await
         .expect("list_roles succeeds");
-    assert_eq!(before, after, "a rejected reorder must not persist partial position changes");
+    assert_eq!(
+        before, after,
+        "a rejected reorder must not persist partial position changes"
+    );
 }
 
 #[tokio::test]
@@ -578,12 +801,24 @@ async fn reorder_roles_allows_the_owner_to_reorder_freely() {
 
     let server = create_server(&domain, owner, "Server6").await;
     let a_id = domain
-        .create_role(owner, server.id, CreateRoleInput { name: "a".to_string() })
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "a".to_string(),
+            },
+        )
         .await
         .expect("create_role succeeds")
         .id;
     let b_id = domain
-        .create_role(owner, server.id, CreateRoleInput { name: "b".to_string() })
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "b".to_string(),
+            },
+        )
         .await
         .expect("create_role succeeds")
         .id;
@@ -606,12 +841,30 @@ async fn a_member_with_manage_channels_can_create_a_channel() {
 
     let server = create_server(&domain, owner, "Server7").await;
     join(&domain, mod_account, server.invite_code.as_ref().unwrap()).await;
-    grant_role(&domain, owner, server.id, mod_account, "Channel Mod", permissions::MANAGE_CHANNELS).await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        mod_account,
+        "Channel Mod",
+        permissions::MANAGE_CHANNELS,
+    )
+    .await;
 
     let result = domain
-        .create_channel(mod_account, server.id, CreateChannelInput { name: "general".to_string(), kind: None })
+        .create_channel(
+            mod_account,
+            server.id,
+            CreateChannelInput {
+                name: "general".to_string(),
+                kind: None,
+            },
+        )
         .await;
-    assert!(result.is_ok(), "MANAGE_CHANNELS holder may create a channel");
+    assert!(
+        result.is_ok(),
+        "MANAGE_CHANNELS holder may create a channel"
+    );
 }
 
 #[tokio::test]
@@ -624,7 +877,14 @@ async fn a_plain_member_without_manage_channels_cannot_create_a_channel() {
     join(&domain, plain, server.invite_code.as_ref().unwrap()).await;
 
     let result = domain
-        .create_channel(plain, server.id, CreateChannelInput { name: "general".to_string(), kind: None })
+        .create_channel(
+            plain,
+            server.id,
+            CreateChannelInput {
+                name: "general".to_string(),
+                kind: None,
+            },
+        )
         .await;
     assert!(matches!(result, Err(DomainError::MissingPermission)));
 }
@@ -642,12 +902,25 @@ async fn a_plain_member_cannot_insert_an_at_everyone_mention_by_editing() {
     let channel = create_channel(&domain, owner, server.id).await;
 
     let message = domain
-        .send_message(plain, channel.id, SendMessageInput { content: "hi".to_string() })
+        .send_message(
+            plain,
+            channel.id,
+            SendMessageInput {
+                content: "hi".to_string(),
+            },
+        )
         .await
         .expect("innocuous message sends");
 
     let result = domain
-        .edit_message(plain, channel.id, message.id, EditMessageInput { content: "@everyone hi".to_string() })
+        .edit_message(
+            plain,
+            channel.id,
+            message.id,
+            EditMessageInput {
+                content: "@everyone hi".to_string(),
+            },
+        )
         .await;
     assert!(matches!(result, Err(DomainError::MentionNotAllowed)));
 }
@@ -660,16 +933,37 @@ async fn mention_everyone_grants_the_at_everyone_token_on_edit_too() {
 
     let server = create_server(&domain, owner, "Server16b").await;
     join(&domain, announcer, server.invite_code.as_ref().unwrap()).await;
-    grant_role(&domain, owner, server.id, announcer, "Announcer", permissions::MENTION_EVERYONE).await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        announcer,
+        "Announcer",
+        permissions::MENTION_EVERYONE,
+    )
+    .await;
     let channel = create_channel(&domain, owner, server.id).await;
 
     let message = domain
-        .send_message(announcer, channel.id, SendMessageInput { content: "hi".to_string() })
+        .send_message(
+            announcer,
+            channel.id,
+            SendMessageInput {
+                content: "hi".to_string(),
+            },
+        )
         .await
         .expect("innocuous message sends");
 
     domain
-        .edit_message(announcer, channel.id, message.id, EditMessageInput { content: "@everyone hi".to_string() })
+        .edit_message(
+            announcer,
+            channel.id,
+            message.id,
+            EditMessageInput {
+                content: "@everyone hi".to_string(),
+            },
+        )
         .await
         .expect("MENTION_EVERYONE holder may insert @everyone via edit");
 }
@@ -685,7 +979,9 @@ async fn set_member_roles_rejects_an_unknown_role_id() {
     let server = create_server(&domain, owner, "Server18").await;
     join(&domain, target, server.invite_code.as_ref().unwrap()).await;
 
-    let result = domain.set_member_roles(owner, server.id, target, vec![app_core::new_id()]).await;
+    let result = domain
+        .set_member_roles(owner, server.id, target, vec![app_core::new_id()])
+        .await;
     assert!(matches!(result, Err(DomainError::RoleNotFound)));
 }
 
@@ -698,9 +994,177 @@ async fn set_member_roles_rejects_explicitly_assigning_the_default_role() {
     let server = create_server(&domain, owner, "Server19").await;
     join(&domain, target, server.invite_code.as_ref().unwrap()).await;
 
-    let roles = domain.list_roles(owner, server.id).await.expect("list_roles succeeds");
-    let default_role = roles.iter().find(|r| r.is_default).expect("a default role exists");
+    let roles = domain
+        .list_roles(owner, server.id)
+        .await
+        .expect("list_roles succeeds");
+    let default_role = roles
+        .iter()
+        .find(|r| r.is_default)
+        .expect("a default role exists");
 
-    let result = domain.set_member_roles(owner, server.id, target, vec![default_role.id]).await;
+    let result = domain
+        .set_member_roles(owner, server.id, target, vec![default_role.id])
+        .await;
     assert!(matches!(result, Err(DomainError::CannotModifyDefaultRole)));
+}
+
+#[tokio::test]
+async fn default_role_rejects_name_color_and_mentionable_updates() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner20@example.com", "owner20").await;
+    let server = create_server(&domain, owner, "Server20").await;
+    let default_role = domain
+        .list_roles(owner, server.id)
+        .await
+        .expect("list_roles succeeds")
+        .into_iter()
+        .find(|role| role.is_default)
+        .expect("a default role exists");
+
+    for input in [
+        UpdateRoleInput {
+            name: Some("renamed".to_string()),
+            color: None,
+            permissions: None,
+            mentionable: None,
+        },
+        UpdateRoleInput {
+            name: None,
+            color: Some("#abc".to_string()),
+            permissions: None,
+            mentionable: None,
+        },
+        UpdateRoleInput {
+            name: None,
+            color: None,
+            permissions: None,
+            mentionable: Some(true),
+        },
+    ] {
+        let result = domain
+            .update_role(owner, server.id, default_role.id, input)
+            .await;
+        assert!(matches!(result, Err(DomainError::CannotModifyDefaultRole)));
+    }
+}
+
+#[tokio::test]
+async fn default_role_rejects_mixed_updates_without_persisting_any_field() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner21@example.com", "owner21").await;
+    let server = create_server(&domain, owner, "Server21").await;
+    let default_role = domain
+        .list_roles(owner, server.id)
+        .await
+        .expect("list_roles succeeds")
+        .into_iter()
+        .find(|role| role.is_default)
+        .expect("a default role exists");
+
+    let result = domain
+        .update_role(
+            owner,
+            server.id,
+            default_role.id,
+            UpdateRoleInput {
+                name: Some("renamed".to_string()),
+                color: Some("#abc".to_string()),
+                permissions: Some(permissions::MANAGE_ROLES),
+                mentionable: Some(true),
+            },
+        )
+        .await;
+    assert!(matches!(result, Err(DomainError::CannotModifyDefaultRole)));
+
+    let unchanged = domain
+        .list_roles(owner, server.id)
+        .await
+        .expect("list_roles succeeds")
+        .into_iter()
+        .find(|role| role.id == default_role.id)
+        .expect("default role remains");
+    assert_eq!(unchanged.name, "everyone");
+    assert_eq!(unchanged.color, None);
+    assert_eq!(unchanged.permissions, 0);
+    assert!(!unchanged.mentionable);
+}
+
+#[tokio::test]
+async fn default_role_allows_permissions_only_updates() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner22@example.com", "owner22").await;
+    let server = create_server(&domain, owner, "Server22").await;
+    let default_role = domain
+        .list_roles(owner, server.id)
+        .await
+        .expect("list_roles succeeds")
+        .into_iter()
+        .find(|role| role.is_default)
+        .expect("a default role exists");
+
+    let updated = domain
+        .update_role(
+            owner,
+            server.id,
+            default_role.id,
+            UpdateRoleInput {
+                name: None,
+                color: None,
+                permissions: Some(permissions::MANAGE_ROLES),
+                mentionable: None,
+            },
+        )
+        .await
+        .expect("permissions-only update succeeds");
+
+    assert_eq!(updated.name, "everyone");
+    assert_eq!(updated.color, None);
+    assert_eq!(updated.permissions, permissions::MANAGE_ROLES);
+    assert!(!updated.mentionable);
+}
+
+#[tokio::test]
+async fn restore_default_role_name_migration_preserves_other_role_fields() {
+    let (domain, auth, pool, _container) = test_services_with_pool().await;
+    let owner = register(&auth, "owner23@example.com", "owner23").await;
+    let server = create_server(&domain, owner, "Server23").await;
+    let default_role = domain
+        .list_roles(owner, server.id)
+        .await
+        .expect("list_roles succeeds")
+        .into_iter()
+        .find(|role| role.is_default)
+        .expect("a default role exists");
+    let permissions = permissions::MANAGE_ROLES;
+
+    sqlx::query(
+        "UPDATE server_role SET name = 'goy', color = '#abc', permissions = $2, mentionable = true WHERE id = $1",
+    )
+    .bind(default_role.id)
+    .bind(permissions)
+    .execute(&pool)
+    .await
+    .expect("corrupt default role for repair test");
+
+    sqlx::query(include_str!(
+        "../../../migrations/0024_restore_default_role_name.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("default-role-name repair migration succeeds");
+
+    let restored = domain
+        .list_roles(owner, server.id)
+        .await
+        .expect("list_roles succeeds")
+        .into_iter()
+        .find(|role| role.id == default_role.id)
+        .expect("default role remains");
+    assert_eq!(restored.name, "everyone");
+    assert_eq!(restored.color.as_deref(), Some("#abc"));
+    assert_eq!(restored.permissions, permissions);
+    assert_eq!(restored.position, 0);
+    assert!(restored.is_default);
+    assert!(restored.mentionable);
 }

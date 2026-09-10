@@ -827,9 +827,10 @@ impl DomainService {
                 }
             };
             validate_thread_title(&title)?;
-            let updated = db::channel::update_thread_title(&self.pool, channel_id, server_id, &title)
-                .await?
-                .ok_or(DomainError::ChannelNotFound)?;
+            let updated =
+                db::channel::update_thread_title(&self.pool, channel_id, server_id, &title)
+                    .await?
+                    .ok_or(DomainError::ChannelNotFound)?;
             Ok(updated.into())
         } else if kind == "text" || kind == "voice" {
             let name = match (input.name, input.title) {
@@ -851,12 +852,13 @@ impl DomainService {
                 }
             };
             validate_channel_name(&name)?;
-            let updated = db::channel::update_channel_name(&self.pool, channel_id, server_id, &name)
-                .await?
-                .ok_or(DomainError::ChannelNotFound)?;
+            let updated =
+                db::channel::update_channel_name(&self.pool, channel_id, server_id, &name)
+                    .await?
+                    .ok_or(DomainError::ChannelNotFound)?;
             Ok(updated.into())
         } else {
-            return Err(DomainError::ChannelNotFound);
+            Err(DomainError::ChannelNotFound)
         }
     }
 
@@ -875,8 +877,7 @@ impl DomainService {
             .await?;
 
         // Full canonical set — live non-thread channels only.
-        let canonical_ids =
-            db::channel::live_non_thread_channel_ids(&self.pool, server_id).await?;
+        let canonical_ids = db::channel::live_non_thread_channel_ids(&self.pool, server_id).await?;
         let canonical_set: HashSet<Uuid> = canonical_ids.iter().copied().collect();
         let provided_set: HashSet<Uuid> = ordered_channel_ids.iter().copied().collect();
 
@@ -910,16 +911,15 @@ impl DomainService {
                 .copied()
                 .collect();
             if !restricted_ids.is_empty() {
-                let granted =
-                    db::channel::channel_ids_with_role_permission(
-                        &self.pool,
-                        &restricted_ids,
-                        &ctx.role_ids,
-                        channel_permissions::VIEW_CHANNEL,
-                    )
-                    .await?
-                    .into_iter()
-                    .collect::<HashSet<Uuid>>();
+                let granted = db::channel::channel_ids_with_role_permission(
+                    &self.pool,
+                    &restricted_ids,
+                    &ctx.role_ids,
+                    channel_permissions::VIEW_CHANNEL,
+                )
+                .await?
+                .into_iter()
+                .collect::<HashSet<Uuid>>();
                 for rid in &restricted_ids {
                     if !granted.contains(rid) {
                         return Err(DomainError::MissingPermission);
@@ -1058,7 +1058,8 @@ impl DomainService {
             .unwrap_or(0);
 
         let member_rows = db::server::list_members(&self.pool, server_id).await?;
-        let role_pairs = db::server_role::role_ids_for_server_members(&self.pool, server_id).await?;
+        let role_pairs =
+            db::server_role::role_ids_for_server_members(&self.pool, server_id).await?;
         let mut account_to_roles: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
         for (aid, rid) in role_pairs {
             account_to_roles.entry(aid).or_default().push(rid);
@@ -1072,7 +1073,10 @@ impl DomainService {
                 viewers.push(row.account_id);
                 continue;
             }
-            let role_ids = account_to_roles.get(&row.account_id).cloned().unwrap_or_default();
+            let role_ids = account_to_roles
+                .get(&row.account_id)
+                .cloned()
+                .unwrap_or_default();
             let mut perms = default_perm;
             for rid in &role_ids {
                 if let Some(p) = role_perms.get(rid) {
@@ -1882,6 +1886,12 @@ impl DomainService {
         let existing = db::server_role::find_role(&self.pool, server_id, role_id)
             .await?
             .ok_or(DomainError::RoleNotFound)?;
+
+        if existing.is_default
+            && (input.name.is_some() || input.color.is_some() || input.mentionable.is_some())
+        {
+            return Err(DomainError::CannotModifyDefaultRole);
+        }
 
         Self::check_hierarchy(&ctx, existing.position)?;
 
