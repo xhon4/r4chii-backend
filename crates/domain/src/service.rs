@@ -1049,6 +1049,12 @@ impl DomainService {
 
         // Server roles map for permission (ADMIN) check.
         let all_roles = db::server_role::list_roles(&self.pool, server_id).await?;
+        if all_roles
+            .iter()
+            .any(|role| role.is_default && grant_set.contains(&role.id))
+        {
+            return Ok(all);
+        }
         let role_perms: HashMap<Uuid, i64> =
             all_roles.iter().map(|r| (r.id, r.permissions)).collect();
         let default_perm = all_roles
@@ -2839,14 +2845,11 @@ impl DomainService {
     pub async fn authorized_account_ids(&self, channel_id: Uuid) -> Result<Vec<Uuid>, DomainError> {
         let channel = self.lookup_channel(channel_id).await?;
 
-        let ids = if is_server_channel(&channel.kind) {
-            let server_id = channel.server_id.ok_or(DomainError::ChannelNotFound)?;
-            db::channel::server_member_account_ids(&self.pool, server_id).await?
+        if is_server_channel(&channel.kind) {
+            self.channel_viewer_account_ids(channel_id).await
         } else {
-            db::channel::channel_member_account_ids(&self.pool, channel_id).await?
-        };
-
-        Ok(ids)
+            Ok(db::channel::channel_member_account_ids(&self.pool, channel_id).await?)
+        }
     }
 
     /// Checks whether `account_id` is authorized to join `channel_id` for a voice call:
@@ -2897,14 +2900,29 @@ impl DomainService {
     }
 
     /// Every channel id `account_id` may receive realtime events for — the
-    /// gateway's `ready` event payload (the set of channel ids the
-    /// account may receive events for). Server channels via `membership`,
-    /// dm/group_dm channels via `channel_member` — the same two paths
-    /// `require_channel_access` checks, just enumerated instead of tested
-    /// against one channel.
+    /// gateway's `ready` event payload. Server channels require membership
+    /// and, when restricted, a qualifying role grant; dm/group_dm channels
+    /// require `channel_member`.
     pub async fn accessible_channel_ids(&self, account_id: Uuid) -> Result<Vec<Uuid>, DomainError> {
         let ids = db::channel::accessible_channel_ids(&self.pool, account_id).await?;
-        Ok(ids)
+        let mut accessible = Vec::with_capacity(ids.len());
+
+        for channel_id in ids {
+            let channel = self.lookup_channel(channel_id).await?;
+            if !channel.restricted
+                || self
+                    .member_can_view_channel(
+                        account_id,
+                        channel.server_id.ok_or(DomainError::ChannelNotFound)?,
+                        channel.parent_channel_id.unwrap_or(channel_id),
+                    )
+                    .await?
+            {
+                accessible.push(channel_id);
+            }
+        }
+
+        Ok(accessible)
     }
 
     /// Who may observe `account_id`'s presence — the recipients of a

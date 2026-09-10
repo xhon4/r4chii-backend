@@ -732,3 +732,102 @@ async fn can_join_voice_respects_permissions_restrictions_and_channel_kind() {
         .await
         .unwrap());
 }
+
+#[tokio::test]
+async fn realtime_recipients_and_ready_channels_drop_revoked_explicit_role_grants() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner_realtime@example.com", "owner_realtime").await;
+    let member = register(&auth, "member_realtime@example.com", "member_realtime").await;
+
+    let server = create_server(&domain, owner, "Realtime Access", None).await;
+    join(&domain, member, server.invite_code.as_ref().unwrap()).await;
+    let channel = create_channel(&domain, owner, server.id, "staff-only").await;
+    domain
+        .update_channel_restricted(owner, server.id, channel.id, true)
+        .await
+        .expect("restricting channel succeeds");
+    grant_channel_view(
+        &domain,
+        owner,
+        server.id,
+        channel.id,
+        member,
+        "Realtime Staff",
+    )
+    .await;
+
+    assert!(domain
+        .authorized_account_ids(channel.id)
+        .await
+        .expect("recipient lookup succeeds")
+        .contains(&member));
+    assert!(domain
+        .accessible_channel_ids(member)
+        .await
+        .expect("ready lookup succeeds")
+        .contains(&channel.id));
+
+    domain
+        .set_member_roles(owner, server.id, member, vec![])
+        .await
+        .expect("role revocation succeeds");
+
+    assert!(
+        !domain
+            .authorized_account_ids(channel.id)
+            .await
+            .expect("recipient lookup succeeds")
+            .contains(&member),
+        "revoking the only granted role must stop channel event fan-out"
+    );
+    assert!(
+        !domain
+            .accessible_channel_ids(member)
+            .await
+            .expect("ready lookup succeeds")
+            .contains(&channel.id),
+        "revoking the only granted role must remove the channel from ready"
+    );
+}
+
+#[tokio::test]
+async fn channel_viewer_account_ids_includes_default_role_grants() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner_default@example.com", "owner_default").await;
+    let member = register(&auth, "member_default@example.com", "member_default").await;
+
+    let server = create_server(&domain, owner, "Default Grant", None).await;
+    join(&domain, member, server.invite_code.as_ref().unwrap()).await;
+    let channel = create_channel(&domain, owner, server.id, "all-members").await;
+    let default_role = domain
+        .list_roles(owner, server.id)
+        .await
+        .expect("list roles succeeds")
+        .into_iter()
+        .find(|role| role.is_default)
+        .expect("server has a default role");
+
+    domain
+        .update_channel_restricted(owner, server.id, channel.id, true)
+        .await
+        .expect("restricting channel succeeds");
+    domain
+        .set_channel_role_permission(
+            owner,
+            server.id,
+            channel.id,
+            default_role.id,
+            channel_permissions::VIEW_CHANNEL,
+        )
+        .await
+        .expect("granting the default role succeeds");
+
+    let viewers = domain
+        .channel_viewer_account_ids(channel.id)
+        .await
+        .expect("viewer lookup succeeds");
+    assert!(
+        viewers.contains(&member),
+        "every member implicitly holds the default role grant"
+    );
+}

@@ -7,17 +7,15 @@
 use std::time::Duration;
 
 use auth::{AuthService, RegisterInput};
-use domain::{CreateChannelInput, CreateServerInput, DomainService, SendMessageInput};
+use domain::{
+    channel_permissions, CreateChannelInput, CreateRoleInput, CreateServerInput, DomainService,
+    SendMessageInput,
+};
 use realtime::{Hub, MemberLeaveReason};
 use test_support::TestDb;
 use tokio::time::timeout;
 
-async fn test_services() -> (
-    Hub,
-    DomainService,
-    AuthService,
-    TestDb,
-) {
+async fn test_services() -> (Hub, DomainService, AuthService, TestDb) {
     let test_db = test_support::test_db().await;
     let pool = test_db.pool();
 
@@ -355,7 +353,10 @@ async fn kick_or_ban_evicts_user_from_voice_and_broadcasts_voice_leave() {
         .await
         .expect("create_server succeeds");
     let invite = server.invite_code.expect("invite code exists");
-    domain.join_via_invite(bob, &invite).await.expect("bob joins");
+    domain
+        .join_via_invite(bob, &invite)
+        .await
+        .expect("bob joins");
 
     let voice_channel = domain
         .create_channel(
@@ -377,7 +378,10 @@ async fn kick_or_ban_evicts_user_from_voice_and_broadcasts_voice_leave() {
     hub.voice_join(voice_channel.id, bob, bob_handle).await;
 
     // Drain join notifications from owner_rx
-    while recv_within(&mut owner_rx, Duration::from_millis(50)).await.is_some() {}
+    while recv_within(&mut owner_rx, Duration::from_millis(50))
+        .await
+        .is_some()
+    {}
 
     // Verify Bob is in voice
     assert_eq!(hub.voice_channel_of(bob).await, Some(voice_channel.id));
@@ -391,7 +395,8 @@ async fn kick_or_ban_evicts_user_from_voice_and_broadcasts_voice_leave() {
         .kick_member(owner, server.id, bob)
         .await
         .expect("kick succeeds");
-    hub.announce_member_leave(&recipients, server.id, bob, MemberLeaveReason::Kicked).await;
+    hub.announce_member_leave(&recipients, server.id, bob, MemberLeaveReason::Kicked)
+        .await;
 
     // Bob must be evicted from voice
     assert_eq!(hub.voice_channel_of(bob).await, None);
@@ -418,18 +423,36 @@ async fn kick_from_one_server_does_not_evict_from_another_servers_voice_channel(
     let bob = register(&auth, "bob_multi@example.com", "bob_multi").await;
 
     let server1 = domain
-        .create_server(owner1, CreateServerInput { name: "Server 1".to_string(), visibility: None })
+        .create_server(
+            owner1,
+            CreateServerInput {
+                name: "Server 1".to_string(),
+                visibility: None,
+            },
+        )
         .await
         .expect("create server 1");
     let invite1 = server1.invite_code.expect("invite 1");
-    domain.join_via_invite(bob, &invite1).await.expect("bob joins server 1");
+    domain
+        .join_via_invite(bob, &invite1)
+        .await
+        .expect("bob joins server 1");
 
     let server2 = domain
-        .create_server(owner2, CreateServerInput { name: "Server 2".to_string(), visibility: None })
+        .create_server(
+            owner2,
+            CreateServerInput {
+                name: "Server 2".to_string(),
+                visibility: None,
+            },
+        )
         .await
         .expect("create server 2");
     let invite2 = server2.invite_code.expect("invite 2");
-    domain.join_via_invite(bob, &invite2).await.expect("bob joins server 2");
+    domain
+        .join_via_invite(bob, &invite2)
+        .await
+        .expect("bob joins server 2");
 
     let voice_channel2 = domain
         .create_channel(
@@ -454,7 +477,8 @@ async fn kick_from_one_server_does_not_evict_from_another_servers_voice_channel(
         .kick_member(owner1, server1.id, bob)
         .await
         .expect("kick from server 1 succeeds");
-    hub.announce_member_leave(&recipients, server1.id, bob, MemberLeaveReason::Kicked).await;
+    hub.announce_member_leave(&recipients, server1.id, bob, MemberLeaveReason::Kicked)
+        .await;
 
     // Bob must STILL be in Server 2's voice channel
     assert_eq!(hub.voice_channel_of(bob).await, Some(voice_channel2.id));
@@ -468,12 +492,24 @@ async fn voice_relay_delivers_only_to_call_holding_connection_and_isolates_chann
     let charlie = register(&auth, "charlie_vr@example.com", "charlie_vr").await;
 
     let server = domain
-        .create_server(owner, CreateServerInput { name: "Relay Server".to_string(), visibility: None })
+        .create_server(
+            owner,
+            CreateServerInput {
+                name: "Relay Server".to_string(),
+                visibility: None,
+            },
+        )
         .await
         .expect("create server");
     let invite = server.invite_code.expect("invite");
-    domain.join_via_invite(bob, &invite).await.expect("bob joins");
-    domain.join_via_invite(charlie, &invite).await.expect("charlie joins");
+    domain
+        .join_via_invite(bob, &invite)
+        .await
+        .expect("bob joins");
+    domain
+        .join_via_invite(charlie, &invite)
+        .await
+        .expect("charlie joins");
 
     let voice_channel1 = domain
         .create_channel(
@@ -509,17 +545,30 @@ async fn voice_relay_delivers_only_to_call_holding_connection_and_isolates_chann
     hub.voice_join(voice_channel1.id, bob, bob_tab1).await;
 
     // Charlie joins Voice Channel 2
-    hub.voice_join(voice_channel2.id, charlie, charlie_handle).await;
+    hub.voice_join(voice_channel2.id, charlie, charlie_handle)
+        .await;
 
     // Drain initial messages
-    while recv_within(&mut bob_tab1_rx, Duration::from_millis(50)).await.is_some() {}
-    while recv_within(&mut bob_tab2_rx, Duration::from_millis(50)).await.is_some() {}
-    while recv_within(&mut charlie_rx, Duration::from_millis(50)).await.is_some() {}
+    while recv_within(&mut bob_tab1_rx, Duration::from_millis(50))
+        .await
+        .is_some()
+    {}
+    while recv_within(&mut bob_tab2_rx, Duration::from_millis(50))
+        .await
+        .is_some()
+    {}
+    while recv_within(&mut charlie_rx, Duration::from_millis(50))
+        .await
+        .is_some()
+    {}
 
     // Owner sends voice signal to Bob
     let signal_payload = serde_json::json!({ "sdp": { "type": "offer", "sdp": "mock-sdp" } });
     let relayed = hub.voice_relay(owner, bob, signal_payload.clone()).await;
-    assert!(relayed, "voice_relay must succeed for peers in the same room");
+    assert!(
+        relayed,
+        "voice_relay must succeed for peers in the same room"
+    );
 
     // Bob Tab 1 (in the call) receives the signal
     let event_str = recv_within(&mut bob_tab1_rx, Duration::from_secs(2))
@@ -533,13 +582,22 @@ async fn voice_relay_delivers_only_to_call_holding_connection_and_isolates_chann
 
     // Bob Tab 2 (not in the call) receives NOTHING
     let tab2_frame = recv_within(&mut bob_tab2_rx, Duration::from_millis(200)).await;
-    assert!(tab2_frame.is_none(), "signals must not leak to tabs not in the call");
+    assert!(
+        tab2_frame.is_none(),
+        "signals must not leak to tabs not in the call"
+    );
 
     // Owner attempts to send voice signal to Charlie (who is in Voice Channel 2, not 1)
     let cross_relayed = hub.voice_relay(owner, charlie, signal_payload).await;
-    assert!(!cross_relayed, "voice_relay must refuse signals between different voice rooms");
+    assert!(
+        !cross_relayed,
+        "voice_relay must refuse signals between different voice rooms"
+    );
     let charlie_frame = recv_within(&mut charlie_rx, Duration::from_millis(200)).await;
-    assert!(charlie_frame.is_none(), "charlie must receive no signal from another channel");
+    assert!(
+        charlie_frame.is_none(),
+        "charlie must receive no signal from another channel"
+    );
 }
 
 /// Pins `Hub::voice_leave_from_channel`'s atomicity property directly rather
@@ -565,31 +623,55 @@ async fn voice_leave_from_channel_is_a_no_op_unless_still_in_that_exact_channel(
     let bob = register(&auth, "bob_toctou@example.com", "bob_toctou").await;
 
     let server_a = domain
-        .create_server(owner, CreateServerInput { name: "Server A".to_string(), visibility: None })
+        .create_server(
+            owner,
+            CreateServerInput {
+                name: "Server A".to_string(),
+                visibility: None,
+            },
+        )
         .await
         .expect("create server a");
     let invite_a = server_a.invite_code.expect("invite a");
-    domain.join_via_invite(bob, &invite_a).await.expect("bob joins server a");
+    domain
+        .join_via_invite(bob, &invite_a)
+        .await
+        .expect("bob joins server a");
     let voice_a = domain
         .create_channel(
             owner,
             server_a.id,
-            CreateChannelInput { name: "Voice A".to_string(), kind: Some("voice".to_string()) },
+            CreateChannelInput {
+                name: "Voice A".to_string(),
+                kind: Some("voice".to_string()),
+            },
         )
         .await
         .expect("create voice channel a");
 
     let server_b = domain
-        .create_server(owner, CreateServerInput { name: "Server B".to_string(), visibility: None })
+        .create_server(
+            owner,
+            CreateServerInput {
+                name: "Server B".to_string(),
+                visibility: None,
+            },
+        )
         .await
         .expect("create server b");
     let invite_b = server_b.invite_code.expect("invite b");
-    domain.join_via_invite(bob, &invite_b).await.expect("bob joins server b");
+    domain
+        .join_via_invite(bob, &invite_b)
+        .await
+        .expect("bob joins server b");
     let voice_b = domain
         .create_channel(
             owner,
             server_b.id,
-            CreateChannelInput { name: "Voice B".to_string(), kind: Some("voice".to_string()) },
+            CreateChannelInput {
+                name: "Voice B".to_string(),
+                kind: Some("voice".to_string()),
+            },
         )
         .await
         .expect("create voice channel b");
@@ -624,4 +706,121 @@ async fn voice_leave_from_channel_is_a_no_op_unless_still_in_that_exact_channel(
     );
 }
 
+#[tokio::test]
+async fn revoking_a_channel_role_stops_message_and_voice_fan_out() {
+    let (hub, domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner_revoked@example.com", "owner_revoked").await;
+    let member = register(&auth, "member_revoked@example.com", "member_revoked").await;
 
+    let server = domain
+        .create_server(
+            owner,
+            CreateServerInput {
+                name: "Revoked Access".to_string(),
+                visibility: None,
+            },
+        )
+        .await
+        .expect("create server succeeds");
+    domain
+        .join_via_invite(member, server.invite_code.as_ref().unwrap())
+        .await
+        .expect("member joins");
+    let channel = domain
+        .create_channel(
+            owner,
+            server.id,
+            CreateChannelInput {
+                name: "staff-voice".to_string(),
+                kind: Some("voice".to_string()),
+            },
+        )
+        .await
+        .expect("create channel succeeds");
+    domain
+        .update_channel_restricted(owner, server.id, channel.id, true)
+        .await
+        .expect("restricting channel succeeds");
+    let role = domain
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "Staff".to_string(),
+            },
+        )
+        .await
+        .expect("create role succeeds");
+    domain
+        .set_member_roles(owner, server.id, member, vec![role.id])
+        .await
+        .expect("assign role succeeds");
+    domain
+        .set_channel_role_permission(
+            owner,
+            server.id,
+            channel.id,
+            role.id,
+            channel_permissions::VIEW_CHANNEL,
+        )
+        .await
+        .expect("grant channel view succeeds");
+
+    let (owner_handle, _owner_rx) = hub.register(owner).await;
+    let (_member_handle, mut member_rx) = hub.register(member).await;
+    while recv_within(&mut member_rx, Duration::from_millis(50))
+        .await
+        .is_some()
+    {}
+
+    let first = domain
+        .send_message(
+            owner,
+            channel.id,
+            SendMessageInput {
+                content: "before revocation".to_string(),
+            },
+        )
+        .await
+        .expect("send succeeds");
+    hub.publish_message_create(channel.id, &first)
+        .await
+        .expect("publish succeeds");
+    assert!(recv_within(&mut member_rx, Duration::from_secs(2))
+        .await
+        .expect("granted member receives the message")
+        .contains("message.create"));
+
+    hub.voice_join(channel.id, owner, owner_handle).await;
+    assert!(recv_within(&mut member_rx, Duration::from_secs(2))
+        .await
+        .expect("granted member receives the voice event")
+        .contains("voice.join"));
+
+    domain
+        .set_member_roles(owner, server.id, member, vec![])
+        .await
+        .expect("revoke role succeeds");
+    hub.voice_leave(owner, None).await;
+
+    let second = domain
+        .send_message(
+            owner,
+            channel.id,
+            SendMessageInput {
+                content: "after revocation".to_string(),
+            },
+        )
+        .await
+        .expect("send succeeds");
+    hub.publish_message_create(channel.id, &second)
+        .await
+        .expect("publish succeeds");
+
+    assert!(
+        recv_within(&mut member_rx, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "a revoked member must receive neither voice.leave nor message.create"
+    );
+}
