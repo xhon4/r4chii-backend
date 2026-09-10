@@ -945,6 +945,8 @@ pub struct ServerMemberResponse {
     pub nickname: Option<String>,
     /// `null`, or a future timestamp while timed out.
     pub timeout_until: Option<DateTime<Utc>>,
+    /// `null` unless the viewer may read the active timeout's reason.
+    pub timeout_reason: Option<String>,
 }
 
 impl ServerMemberResponse {
@@ -964,6 +966,7 @@ impl ServerMemberResponse {
             role_ids: member.role_ids,
             nickname: member.nickname,
             timeout_until: member.timeout_until,
+            timeout_reason: member.timeout_reason,
         }
     }
 }

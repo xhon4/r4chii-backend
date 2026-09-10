@@ -213,6 +213,7 @@ pub struct ServerMemberRow {
     /// `Some(t)` in the future means this member is currently
     /// timed out.
     pub timeout_until: Option<DateTime<Utc>>,
+    pub timeout_reason: Option<String>,
 }
 
 /// Every member of `server_id`, oldest membership first (so the owner, who
@@ -225,7 +226,7 @@ pub async fn list_members(
 ) -> Result<Vec<ServerMemberRow>, sqlx::Error> {
     sqlx::query_as::<_, ServerMemberRow>(
         "SELECT a.id AS account_id, a.username, a.display_name, a.avatar_url, \
-                m.role, m.joined_at, m.nickname, m.timeout_until \
+                m.role, m.joined_at, m.nickname, m.timeout_until, m.timeout_reason \
          FROM membership m \
          JOIN account a ON a.id = m.account_id \
          WHERE m.server_id = $1 \

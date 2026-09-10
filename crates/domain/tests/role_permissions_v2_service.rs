@@ -6,9 +6,9 @@
 use app_core::Uuid;
 use chrono::{Duration, Utc};
 use domain::{
-    permissions, ChannelSummary, CreateChannelInput, CreateRoleInput, CreateServerInput,
-    DomainError, DomainService, EditMessageInput, SendMessageInput, ServerSummary, TimeoutInput,
-    UpdateRoleInput,
+    permissions, ChannelSummary, CreateChannelInput, CreateGroupDmInput, CreateRoleInput,
+    CreateServerInput, CreateThreadInput, DomainError, DomainService, EditMessageInput,
+    RenameChannelInput, SendMessageInput, ServerSummary, TimeoutInput, UpdateRoleInput,
 };
 
 mod common;
@@ -1275,4 +1275,469 @@ async fn restore_default_role_name_migration_preserves_other_role_fields() {
     assert_eq!(restored.position, 0);
     assert!(restored.is_default);
     assert!(restored.mentionable);
+}
+
+#[tokio::test]
+async fn an_active_timeout_blocks_content_management_without_persisting_changes() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "timeout_owner@example.com", "timeout_owner").await;
+    let target = register(&auth, "timeout_target@example.com", "timeout_target").await;
+    let author = register(&auth, "timeout_author@example.com", "timeout_author").await;
+
+    let server = create_server(&domain, owner, "Timeout Server").await;
+    let invite = server.invite_code.as_ref().unwrap();
+    join(&domain, target, invite).await;
+    join(&domain, author, invite).await;
+    let viewer_role = domain
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "Viewer".to_string(),
+            },
+        )
+        .await
+        .expect("create viewer role succeeds");
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        target,
+        "Content Manager",
+        permissions::MANAGE_CHANNELS
+            | permissions::MANAGE_VISIBILITY
+            | permissions::MANAGE_MESSAGES
+            | permissions::PIN_MESSAGES,
+    )
+    .await;
+
+    let general = create_channel(&domain, owner, server.id).await;
+    let secondary = domain
+        .create_channel(
+            owner,
+            server.id,
+            CreateChannelInput {
+                name: "secondary".to_string(),
+                kind: None,
+            },
+        )
+        .await
+        .expect("create secondary channel succeeds");
+    let own_message = domain
+        .send_message(
+            target,
+            general.id,
+            SendMessageInput {
+                content: "own original".to_string(),
+            },
+        )
+        .await
+        .expect("target message succeeds before timeout");
+    let other_message = domain
+        .send_message(
+            author,
+            general.id,
+            SendMessageInput {
+                content: "other original".to_string(),
+            },
+        )
+        .await
+        .expect("author message succeeds");
+    domain
+        .pin_message(owner, general.id, other_message.id)
+        .await
+        .expect("owner pins baseline message");
+
+    domain
+        .timeout_member(
+            owner,
+            server.id,
+            target,
+            TimeoutInput {
+                until: Utc::now() + Duration::hours(1),
+                reason: None,
+            },
+        )
+        .await
+        .expect("timeout succeeds");
+
+    assert!(matches!(
+        domain
+            .edit_message(
+                target,
+                general.id,
+                own_message.id,
+                EditMessageInput {
+                    content: "changed".to_string(),
+                },
+            )
+            .await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain
+            .delete_message(target, general.id, own_message.id)
+            .await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain
+            .delete_message(target, general.id, other_message.id)
+            .await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain.pin_message(target, general.id, own_message.id).await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain
+            .unpin_message(target, general.id, other_message.id)
+            .await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain
+            .create_channel(
+                target,
+                server.id,
+                CreateChannelInput {
+                    name: "blocked".to_string(),
+                    kind: None,
+                },
+            )
+            .await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain
+            .create_thread(
+                target,
+                general.id,
+                CreateThreadInput {
+                    title: "blocked thread".to_string(),
+                    root_message_id: None,
+                },
+            )
+            .await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain
+            .rename_channel(
+                target,
+                server.id,
+                general.id,
+                RenameChannelInput {
+                    name: Some("renamed".to_string()),
+                    title: None,
+                },
+            )
+            .await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain
+            .reorder_channels(target, server.id, vec![secondary.id, general.id])
+            .await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain.delete_channel(target, server.id, general.id).await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain
+            .update_channel_visibility(target, server.id, general.id, Some("private".to_string()))
+            .await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain
+            .update_channel_restricted(target, server.id, general.id, true)
+            .await,
+        Err(DomainError::MemberTimedOut)
+    ));
+    assert!(matches!(
+        domain
+            .set_channel_role_permission(target, server.id, general.id, viewer_role.id, 0,)
+            .await,
+        Err(DomainError::MemberTimedOut)
+    ));
+
+    let messages = domain
+        .list_messages(target, general.id, Default::default())
+        .await
+        .expect("timed-out member still reads");
+    assert!(messages.iter().any(|message| {
+        message.id == own_message.id
+            && message.content.as_deref() == Some("own original")
+            && message.deleted_at.is_none()
+    }));
+    assert!(messages.iter().any(|message| {
+        message.id == other_message.id
+            && message.content.as_deref() == Some("other original")
+            && message.deleted_at.is_none()
+            && message.pinned_at.is_some()
+    }));
+    let channels = domain
+        .list_channels(target, server.id)
+        .await
+        .expect("timed-out member still lists channels");
+    assert_eq!(
+        channels
+            .iter()
+            .map(|channel| channel.id)
+            .collect::<Vec<_>>(),
+        vec![general.id, secondary.id]
+    );
+}
+
+#[tokio::test]
+async fn a_timeout_is_limited_to_its_server_and_does_not_block_dms_or_group_dms() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "scope_owner@example.com", "scope_owner").await;
+    let target = register(&auth, "scope_target@example.com", "scope_target").await;
+    let dm_peer = register(&auth, "scope_peer@example.com", "scope_peer").await;
+    let group_peer = register(&auth, "scope_group@example.com", "scope_group").await;
+
+    let server = create_server(&domain, owner, "Timed Server").await;
+    join(&domain, target, server.invite_code.as_ref().unwrap()).await;
+    domain
+        .timeout_member(
+            owner,
+            server.id,
+            target,
+            TimeoutInput {
+                until: Utc::now() + Duration::hours(1),
+                reason: None,
+            },
+        )
+        .await
+        .expect("timeout succeeds");
+
+    let (dm, _) = domain
+        .create_dm(target, dm_peer)
+        .await
+        .expect("DM creation remains allowed");
+    domain
+        .send_message(
+            target,
+            dm.id,
+            SendMessageInput {
+                content: "DM remains available".to_string(),
+            },
+        )
+        .await
+        .expect("DM send remains allowed");
+    let group_dm = domain
+        .create_group_dm(
+            target,
+            CreateGroupDmInput {
+                account_ids: vec![dm_peer, group_peer],
+            },
+        )
+        .await
+        .expect("group DM creation remains allowed");
+    domain
+        .send_message(
+            target,
+            group_dm.id,
+            SendMessageInput {
+                content: "group DM remains available".to_string(),
+            },
+        )
+        .await
+        .expect("group DM send remains allowed");
+
+    let other_server = create_server(&domain, target, "Other Server").await;
+    let other_channel = create_channel(&domain, target, other_server.id).await;
+    domain
+        .send_message(
+            target,
+            other_channel.id,
+            SendMessageInput {
+                content: "other server remains available".to_string(),
+            },
+        )
+        .await
+        .expect("other-server send remains allowed");
+}
+
+#[tokio::test]
+async fn timeout_reason_is_visible_only_to_the_target_owner_or_admin_while_active() {
+    let (domain, auth, pool, _container) = test_services_with_pool().await;
+    let owner = register(&auth, "reason_owner@example.com", "reason_owner").await;
+    let issuer = register(&auth, "reason_issuer@example.com", "reason_issuer").await;
+    let target = register(&auth, "reason_target@example.com", "reason_target").await;
+    let ordinary = register(&auth, "reason_ordinary@example.com", "reason_ordinary").await;
+    let admin = register(&auth, "reason_admin@example.com", "reason_admin").await;
+
+    let server = create_server(&domain, owner, "Reason Server").await;
+    let invite = server.invite_code.as_ref().unwrap();
+    for account_id in [issuer, target, ordinary, admin] {
+        join(&domain, account_id, invite).await;
+    }
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        issuer,
+        "Timeout Issuer",
+        permissions::TIMEOUT_MEMBERS,
+    )
+    .await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        admin,
+        "Administrator",
+        permissions::ADMIN,
+    )
+    .await;
+    domain
+        .timeout_member(
+            issuer,
+            server.id,
+            target,
+            TimeoutInput {
+                until: Utc::now() + Duration::hours(1),
+                reason: Some("repeated spam".to_string()),
+            },
+        )
+        .await
+        .expect("timeout succeeds");
+
+    for (viewer, expected_reason) in [
+        (owner, Some("repeated spam")),
+        (issuer, None),
+        (target, Some("repeated spam")),
+        (ordinary, None),
+        (admin, Some("repeated spam")),
+    ] {
+        let members = domain
+            .list_members(viewer, server.id)
+            .await
+            .expect("member listing succeeds");
+        let member = members
+            .iter()
+            .find(|member| member.account_id == target)
+            .expect("target is listed");
+        assert_eq!(member.timeout_reason.as_deref(), expected_reason);
+    }
+
+    domain
+        .clear_timeout(issuer, server.id, target)
+        .await
+        .expect("timeout clear succeeds");
+    let cleared = domain
+        .list_members(owner, server.id)
+        .await
+        .expect("member listing succeeds");
+    assert!(cleared
+        .iter()
+        .find(|member| member.account_id == target)
+        .expect("target is listed")
+        .timeout_reason
+        .is_none());
+
+    db::channel::set_member_timeout(
+        &pool,
+        server.id,
+        target,
+        Some(Utc::now() - Duration::minutes(1)),
+        Some("expired reason"),
+    )
+    .await
+    .expect("expired timeout is stored for redaction coverage");
+    let expired = domain
+        .list_members(admin, server.id)
+        .await
+        .expect("member listing succeeds");
+    assert!(expired
+        .iter()
+        .find(|member| member.account_id == target)
+        .expect("target is listed")
+        .timeout_reason
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_timed_out_moderator_cannot_moderate_other_members() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner_mod_timeout@example.com", "ownermodtimeout").await;
+    let mod_account = register(&auth, "mod_timeout@example.com", "modtimeout").await;
+    let target = register(&auth, "target_mod_timeout@example.com", "targetmodtimeout").await;
+
+    let server = create_server(&domain, owner, "Server").await;
+    join(&domain, mod_account, server.invite_code.as_ref().unwrap()).await;
+    join(&domain, target, server.invite_code.as_ref().unwrap()).await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        mod_account,
+        "Mod",
+        permissions::TIMEOUT_MEMBERS | permissions::KICK | permissions::MANAGE_NICKNAMES,
+    )
+    .await;
+
+    let until = Utc::now() + Duration::hours(1);
+
+    // The permissions are real: the same calls succeed before the moderator
+    // is sanctioned.
+    domain
+        .timeout_member(
+            mod_account,
+            server.id,
+            target,
+            TimeoutInput {
+                until,
+                reason: Some("spamming".to_string()),
+            },
+        )
+        .await
+        .expect("an unsanctioned moderator may time a member out");
+
+    domain
+        .timeout_member(
+            owner,
+            server.id,
+            mod_account,
+            TimeoutInput {
+                until,
+                reason: Some("abusing moderation".to_string()),
+            },
+        )
+        .await
+        .expect("the owner may time the moderator out");
+
+    // Sanctioned, the same permissions no longer act on anyone else.
+    let timeout_others = domain
+        .timeout_member(
+            mod_account,
+            server.id,
+            target,
+            TimeoutInput {
+                until,
+                reason: Some("from a sanctioned moderator".to_string()),
+            },
+        )
+        .await;
+    assert!(matches!(timeout_others, Err(DomainError::MemberTimedOut)));
+
+    let clear_others = domain.clear_timeout(mod_account, server.id, target).await;
+    assert!(matches!(clear_others, Err(DomainError::MemberTimedOut)));
+
+    let kick = domain.kick_member(mod_account, server.id, target).await;
+    assert!(matches!(kick, Err(DomainError::MemberTimedOut)));
+
+    let rename = domain
+        .update_member_nickname(mod_account, server.id, target, Some("renamed".to_string()))
+        .await;
+    assert!(matches!(rename, Err(DomainError::MemberTimedOut)));
+
+    // Reading is still unaffected.
+    assert!(domain.list_members(mod_account, server.id).await.is_ok());
 }

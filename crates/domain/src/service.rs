@@ -140,6 +140,7 @@ impl From<db::server::ServerMemberRow> for ServerMemberSummary {
             role_ids: Vec::new(),
             nickname: row.nickname,
             timeout_until: row.timeout_until,
+            timeout_reason: row.timeout_reason,
         }
     }
 }
@@ -459,6 +460,7 @@ impl DomainService {
     ) -> Result<ServerSummary, DomainError> {
         self.require_permission(account_id, server_id, permissions::MANAGE_INVITES)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         // `update_invite_code` touches only `server`, not `membership`, so it
         // can't carry the caller's own `spaces_position` — fetched separately.
@@ -498,6 +500,7 @@ impl DomainService {
     ) -> Result<ChannelSummary, DomainError> {
         self.require_permission(account_id, server_id, permissions::MANAGE_CHANNELS)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
         validate_channel_name(&input.name)?;
         let kind = validate_channel_kind(input.kind.as_deref())?;
 
@@ -528,6 +531,10 @@ impl DomainService {
         server_id: Uuid,
     ) -> Result<Vec<ServerMemberSummary>, DomainError> {
         self.require_membership(account_id, server_id).await?;
+        let ctx = self.member_context(account_id, server_id).await?;
+        let can_view_timeout_reason =
+            ctx.is_owner || permissions::has(ctx.permissions, permissions::ADMIN);
+        let now = Utc::now();
 
         let rows = db::server::list_members(&self.pool, server_id).await?;
         // One extra bulk query rather than one per row (M2) — see
@@ -542,6 +549,11 @@ impl DomainService {
                 .filter(|(account, _)| *account == member.account_id)
                 .map(|(_, role_id)| *role_id)
                 .collect();
+            if !member.timeout_until.is_some_and(|until| until > now)
+                || (member.account_id != account_id && !can_view_timeout_reason)
+            {
+                member.timeout_reason = None;
+            }
         }
 
         Ok(members)
@@ -724,6 +736,7 @@ impl DomainService {
     ) -> Result<(), DomainError> {
         self.require_permission(account_id, server_id, permissions::MANAGE_CHANNELS)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         // Parentage is immutable; this pre-read lets a direct child deletion
         // acquire locks in the same server -> parent -> child order as a
@@ -792,6 +805,7 @@ impl DomainService {
     ) -> Result<ChannelSummary, DomainError> {
         self.require_permission(account_id, server_id, permissions::MANAGE_CHANNELS)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         // Confirm the channel belongs to `server_id` and resolve its current
         // kind/restriction in one lookup — same non-leaking 404 as
@@ -875,6 +889,7 @@ impl DomainService {
         let ctx = self
             .require_permission(account_id, server_id, permissions::MANAGE_CHANNELS)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         // Full canonical set — live non-thread channels only.
         let canonical_ids = db::channel::live_non_thread_channel_ids(&self.pool, server_id).await?;
@@ -1114,6 +1129,7 @@ impl DomainService {
     ) -> Result<ChannelSummary, DomainError> {
         self.require_permission(account_id, server_id, permissions::MANAGE_VISIBILITY)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         if let Some(value) = &visibility {
             validate_visibility(value)?;
@@ -1159,6 +1175,7 @@ impl DomainService {
     ) -> Result<ChannelSummary, DomainError> {
         self.require_permission(account_id, server_id, permissions::MANAGE_CHANNELS)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         let channel = self.lookup_channel(channel_id).await?;
         if channel.kind == "thread" {
@@ -1193,6 +1210,7 @@ impl DomainService {
     ) -> Result<(), DomainError> {
         self.require_permission(account_id, server_id, permissions::MANAGE_CHANNELS)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         let channel = self.lookup_channel(channel_id).await?;
         if channel.kind == "thread" {
@@ -1869,6 +1887,7 @@ impl DomainService {
     ) -> Result<RoleSummary, DomainError> {
         self.require_permission(account_id, server_id, permissions::MANAGE_ROLES)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
         validate_role_name(&input.name)?;
 
         let count = db::server_role::count_roles(&self.pool, server_id).await?;
@@ -1907,6 +1926,7 @@ impl DomainService {
         let ctx = self
             .require_permission(account_id, server_id, permissions::MANAGE_ROLES)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         let existing = db::server_role::find_role(&self.pool, server_id, role_id)
             .await?
@@ -1977,6 +1997,7 @@ impl DomainService {
         let ctx = self
             .require_permission(account_id, server_id, permissions::MANAGE_ROLES)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         let existing = db::server_role::find_role(&self.pool, server_id, role_id)
             .await?
@@ -2009,6 +2030,7 @@ impl DomainService {
         let ctx = self
             .require_permission(account_id, server_id, permissions::MANAGE_ROLES)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         let existing = db::server_role::list_roles(&self.pool, server_id).await?;
         let non_default_ids: HashSet<Uuid> = existing
@@ -2063,6 +2085,7 @@ impl DomainService {
         let ctx = self
             .require_permission(account_id, server_id, permissions::MANAGE_ROLES)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         let target_membership =
             db::channel::find_membership(&self.pool, server_id, target_account_id)
@@ -2150,6 +2173,7 @@ impl DomainService {
     ) -> Result<(), DomainError> {
         self.require_permission(account_id, server_id, permissions::BAN)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
         let removed = db::server_role::delete_ban(&self.pool, server_id, target_account_id).await?;
         if !removed {
             return Err(DomainError::AccountNotFound);
@@ -2190,6 +2214,7 @@ impl DomainService {
         let ctx = self
             .require_permission(account_id, server_id, permissions::KICK)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         let target = db::channel::find_membership(&self.pool, server_id, target_account_id)
             .await?
@@ -2223,6 +2248,7 @@ impl DomainService {
         let ctx = self
             .require_permission(account_id, server_id, permissions::BAN)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         // Checked BEFORE the membership lookup below: a ban already removes
         // the target's `membership` row (`remove_member`), so a second ban
@@ -2405,6 +2431,7 @@ impl DomainService {
         // rejected exactly the same way, not just checked at creation time.
         if is_server_channel(&channel.kind) {
             let server_id = channel.server_id.ok_or(DomainError::ChannelNotFound)?;
+            self.require_not_timed_out(account_id, server_id).await?;
             let tokens = extract_mention_tokens(&input.content);
             if !tokens.is_empty() {
                 self.check_mention_permissions(account_id, server_id, &tokens)
@@ -2437,6 +2464,10 @@ impl DomainService {
         message_id: Uuid,
     ) -> Result<(), DomainError> {
         let channel = self.require_channel_access(account_id, channel_id).await?;
+        if is_server_channel(&channel.kind) {
+            let server_id = channel.server_id.ok_or(DomainError::ChannelNotFound)?;
+            self.require_not_timed_out(account_id, server_id).await?;
+        }
 
         let row = db::message::find_owner(&self.pool, message_id, channel_id)
             .await?
@@ -2471,6 +2502,7 @@ impl DomainService {
     ) -> Result<MessageSummary, DomainError> {
         let channel = self.require_channel_access(account_id, channel_id).await?;
         let server_id = channel.server_id.ok_or(DomainError::ChannelNotFound)?;
+        self.require_not_timed_out(account_id, server_id).await?;
         self.require_permission(account_id, server_id, permissions::PIN_MESSAGES)
             .await?;
 
@@ -2490,6 +2522,7 @@ impl DomainService {
     ) -> Result<MessageSummary, DomainError> {
         let channel = self.require_channel_access(account_id, channel_id).await?;
         let server_id = channel.server_id.ok_or(DomainError::ChannelNotFound)?;
+        self.require_not_timed_out(account_id, server_id).await?;
         self.require_permission(account_id, server_id, permissions::PIN_MESSAGES)
             .await?;
 
@@ -2537,6 +2570,7 @@ impl DomainService {
         let ctx = self
             .require_permission(account_id, server_id, permissions::TIMEOUT_MEMBERS)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         let target = db::channel::find_membership(&self.pool, server_id, target_account_id)
             .await?
@@ -2576,6 +2610,7 @@ impl DomainService {
         let ctx = self
             .require_permission(account_id, server_id, permissions::TIMEOUT_MEMBERS)
             .await?;
+        self.require_not_timed_out(account_id, server_id).await?;
 
         let target = db::channel::find_membership(&self.pool, server_id, target_account_id)
             .await?
@@ -2613,6 +2648,7 @@ impl DomainService {
             let ctx = self
                 .require_permission(account_id, server_id, permissions::MANAGE_NICKNAMES)
                 .await?;
+            self.require_not_timed_out(account_id, server_id).await?;
 
             let target = db::channel::find_membership(&self.pool, server_id, target_account_id)
                 .await?

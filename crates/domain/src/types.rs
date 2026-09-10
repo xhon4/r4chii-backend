@@ -251,6 +251,9 @@ pub struct ServerMemberSummary {
     /// `Some(t)` in the future means this member is currently
     /// timed out.
     pub timeout_until: Option<DateTime<Utc>>,
+    /// Present only to the timed-out member, server owner, and effective
+    /// `ADMIN` viewers while the timeout remains active.
+    pub timeout_reason: Option<String>,
 }
 
 /// A `server_role` row (M2).
