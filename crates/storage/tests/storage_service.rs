@@ -38,7 +38,9 @@ fn one_response_server(response: &str) -> (String, thread::JoinHandle<()>) {
     let worker = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("client connects");
         let mut request = [0; 4096];
-        stream.read(&mut request).expect("client sends a request");
+        // The stub never parses the request, it only has to drain it before
+        // replying, so a short read is a valid outcome rather than an error.
+        let _request_len = stream.read(&mut request).expect("client sends a request");
         stream
             .write_all(response.as_bytes())
             .expect("server sends a response");
