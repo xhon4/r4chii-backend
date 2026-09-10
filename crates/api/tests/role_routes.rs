@@ -52,6 +52,7 @@ async fn create_role(app: &axum::Router, token: &str, server_id: &str, name: &st
     body_json(response).await
 }
 
+const ADMIN: i64 = 1 << 0;
 const MANAGE_ROLES: i64 = 1 << 1;
 
 #[tokio::test]
@@ -379,24 +380,49 @@ async fn the_default_role_rejects_identity_updates() {
 }
 
 #[tokio::test]
-async fn the_default_role_allows_permissions_only_updates() {
+async fn only_owner_or_admin_can_update_default_role_permissions() {
     let (app, mail, _container) = test_app().await;
-    let (_alice_id, alice_token) = register_and_login(
+    let (_owner_id, owner_token) = register_and_login(
         &app,
         &mail,
-        "alice_permissions@example.com",
-        "alicepermissions",
+        "owner_permissions@example.com",
+        "ownerpermissions",
     )
     .await;
-    let server = create_server(&app, &alice_token, "Alice's Place").await;
+    let (_member_id, member_token) = register_and_login(
+        &app,
+        &mail,
+        "member_permissions@example.com",
+        "memberpermissions",
+    )
+    .await;
+    let (manager_id, manager_token) = register_and_login(
+        &app,
+        &mail,
+        "manager_permissions@example.com",
+        "managerpermissions",
+    )
+    .await;
+    let (admin_id, admin_token) = register_and_login(
+        &app,
+        &mail,
+        "admin_permissions@example.com",
+        "adminpermissions",
+    )
+    .await;
+    let server = create_server(&app, &owner_token, "Alice's Place").await;
     let server_id = server["id"].as_str().expect("server id present");
+    let invite_code = server["invite_code"].as_str().expect("invite code present");
+    join_server(&app, &member_token, invite_code).await;
+    join_server(&app, &manager_token, invite_code).await;
+    join_server(&app, &admin_token, invite_code).await;
 
     let roles = app
         .clone()
         .oneshot(auth_request(
             Method::GET,
             &format!("/api/v1/servers/{server_id}/roles"),
-            &alice_token,
+            &owner_token,
         ))
         .await
         .expect("list roles succeeds");
@@ -405,20 +431,95 @@ async fn the_default_role_allows_permissions_only_updates() {
         .as_str()
         .expect("default role id");
 
-    let response = app
+    for (name, account_id, _token, permissions) in [
+        ("manager", manager_id, &manager_token, MANAGE_ROLES),
+        ("admin", admin_id, &admin_token, ADMIN),
+    ] {
+        let role = create_role(&app, &owner_token, server_id, name).await;
+        let role_id = role["id"].as_str().expect("role id present");
+        let update = app
+            .clone()
+            .oneshot(auth_json_request(
+                Method::PATCH,
+                &format!("/api/v1/servers/{server_id}/roles/{role_id}"),
+                &owner_token,
+                json!({ "permissions": permissions }),
+            ))
+            .await
+            .expect("set role permissions request succeeds");
+        assert_eq!(update.status(), StatusCode::OK);
+        let assign = app
+            .clone()
+            .oneshot(auth_json_request(
+                Method::PATCH,
+                &format!("/api/v1/servers/{server_id}/members/{account_id}/roles"),
+                &owner_token,
+                json!({ "role_ids": [role_id] }),
+            ))
+            .await
+            .expect("assign role request succeeds");
+        assert_eq!(assign.status(), StatusCode::OK);
+    }
+
+    for token in [&member_token, &manager_token] {
+        let response = app
+            .clone()
+            .oneshot(auth_json_request(
+                Method::PATCH,
+                &format!("/api/v1/servers/{server_id}/roles/{default_role_id}"),
+                token,
+                json!({ "permissions": MANAGE_ROLES }),
+            ))
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = body_json(response).await;
+        assert_eq!(body["error"]["code"], "missing_permission");
+
+        let roles = app
+            .clone()
+            .oneshot(auth_request(
+                Method::GET,
+                &format!("/api/v1/servers/{server_id}/roles"),
+                &owner_token,
+            ))
+            .await
+            .expect("list roles succeeds");
+        let body = body_json(roles).await;
+        let default_role = body["items"]
+            .as_array()
+            .expect("items array")
+            .iter()
+            .find(|role| role["id"].as_str() == Some(default_role_id))
+            .expect("default role present");
+        assert_eq!(default_role["permissions"], 0);
+    }
+
+    let owner_response = app
+        .clone()
         .oneshot(auth_json_request(
             Method::PATCH,
             &format!("/api/v1/servers/{server_id}/roles/{default_role_id}"),
-            &alice_token,
+            &owner_token,
             json!({ "permissions": MANAGE_ROLES }),
         ))
         .await
-        .expect("request succeeds");
+        .expect("owner request succeeds");
+    assert_eq!(owner_response.status(), StatusCode::OK);
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = body_json(response).await;
+    let admin_response = app
+        .oneshot(auth_json_request(
+            Method::PATCH,
+            &format!("/api/v1/servers/{server_id}/roles/{default_role_id}"),
+            &admin_token,
+            json!({ "permissions": ADMIN }),
+        ))
+        .await
+        .expect("admin request succeeds");
+    assert_eq!(admin_response.status(), StatusCode::OK);
+    let body = body_json(admin_response).await;
     assert_eq!(body["name"], "everyone");
     assert_eq!(body["color"], Value::Null);
-    assert_eq!(body["permissions"], MANAGE_ROLES);
+    assert_eq!(body["permissions"], ADMIN);
     assert_eq!(body["mentionable"], false);
 }

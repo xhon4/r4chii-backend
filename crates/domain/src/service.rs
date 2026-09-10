@@ -1911,6 +1911,12 @@ impl DomainService {
         {
             return Err(DomainError::CannotModifyDefaultRole);
         }
+        if existing.is_default
+            && !ctx.is_owner
+            && !permissions::has(ctx.permissions, permissions::ADMIN)
+        {
+            return Err(DomainError::MissingPermission);
+        }
 
         Self::check_hierarchy(&ctx, existing.position)?;
 

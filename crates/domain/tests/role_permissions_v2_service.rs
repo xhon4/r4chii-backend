@@ -1091,10 +1091,17 @@ async fn default_role_rejects_mixed_updates_without_persisting_any_field() {
 }
 
 #[tokio::test]
-async fn default_role_allows_permissions_only_updates() {
+async fn only_owner_or_admin_can_update_default_role_permissions() {
     let (domain, auth, _container) = test_services().await;
     let owner = register(&auth, "owner22@example.com", "owner22").await;
+    let member = register(&auth, "member22@example.com", "member22").await;
+    let manager = register(&auth, "manager22@example.com", "manager22").await;
+    let admin = register(&auth, "admin22@example.com", "admin22").await;
     let server = create_server(&domain, owner, "Server22").await;
+    let invite_code = server.invite_code.as_ref().unwrap();
+    join(&domain, member, invite_code).await;
+    join(&domain, manager, invite_code).await;
+    join(&domain, admin, invite_code).await;
     let default_role = domain
         .list_roles(owner, server.id)
         .await
@@ -1103,7 +1110,52 @@ async fn default_role_allows_permissions_only_updates() {
         .find(|role| role.is_default)
         .expect("a default role exists");
 
-    let updated = domain
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        manager,
+        "Manager",
+        permissions::MANAGE_ROLES,
+    )
+    .await;
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        admin,
+        "Admin",
+        permissions::ADMIN,
+    )
+    .await;
+
+    for actor in [member, manager] {
+        let result = domain
+            .update_role(
+                actor,
+                server.id,
+                default_role.id,
+                UpdateRoleInput {
+                    name: None,
+                    color: None,
+                    permissions: Some(permissions::MANAGE_ROLES),
+                    mentionable: None,
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(DomainError::MissingPermission)));
+    }
+
+    let unchanged = domain
+        .list_roles(owner, server.id)
+        .await
+        .expect("list_roles succeeds")
+        .into_iter()
+        .find(|role| role.id == default_role.id)
+        .expect("default role remains");
+    assert_eq!(unchanged.permissions, 0);
+
+    let owner_updated = domain
         .update_role(
             owner,
             server.id,
@@ -1116,12 +1168,68 @@ async fn default_role_allows_permissions_only_updates() {
             },
         )
         .await
-        .expect("permissions-only update succeeds");
+        .expect("owner permissions-only update succeeds");
+    assert_eq!(owner_updated.permissions, permissions::MANAGE_ROLES);
 
-    assert_eq!(updated.name, "everyone");
-    assert_eq!(updated.color, None);
-    assert_eq!(updated.permissions, permissions::MANAGE_ROLES);
-    assert!(!updated.mentionable);
+    let admin_updated = domain
+        .update_role(
+            admin,
+            server.id,
+            default_role.id,
+            UpdateRoleInput {
+                name: None,
+                color: None,
+                permissions: Some(permissions::ADMIN),
+                mentionable: None,
+            },
+        )
+        .await
+        .expect("admin permissions-only update succeeds");
+    assert_eq!(admin_updated.permissions, permissions::ADMIN);
+}
+
+#[tokio::test]
+async fn manage_roles_can_still_update_a_lower_nondefault_role() {
+    let (domain, auth, _container) = test_services().await;
+    let owner = register(&auth, "owner24@example.com", "owner24").await;
+    let manager = register(&auth, "manager24@example.com", "manager24").await;
+    let server = create_server(&domain, owner, "Server24").await;
+    join(&domain, manager, server.invite_code.as_ref().unwrap()).await;
+    let target = domain
+        .create_role(
+            owner,
+            server.id,
+            CreateRoleInput {
+                name: "Target".to_string(),
+            },
+        )
+        .await
+        .expect("create target role succeeds");
+    grant_role(
+        &domain,
+        owner,
+        server.id,
+        manager,
+        "Manager",
+        permissions::MANAGE_ROLES | permissions::MANAGE_CHANNELS,
+    )
+    .await;
+
+    let updated = domain
+        .update_role(
+            manager,
+            server.id,
+            target.id,
+            UpdateRoleInput {
+                name: None,
+                color: None,
+                permissions: Some(permissions::MANAGE_CHANNELS),
+                mentionable: None,
+            },
+        )
+        .await
+        .expect("manager can update a lower non-default role");
+    assert_eq!(updated.permissions, permissions::MANAGE_CHANNELS);
 }
 
 #[tokio::test]
