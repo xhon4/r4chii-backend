@@ -193,6 +193,12 @@ async fn m0_success_criteria_round_trip_works_end_to_end() {
     let channel = body_json(channel_response).await;
     let channel_id = channel["id"].as_str().expect("channel id present").to_string();
 
+    // Creating a channel fans a `channel.create` event out to the server's members,
+    // the owner included. Drain it so the reads below start at the message events.
+    let alice_channel_created = next_ws_message(&mut alice_ws).await;
+    assert_eq!(alice_channel_created["type"], "channel.create");
+    assert_eq!(alice_channel_created["data"]["channel"]["id"], channel_id);
+
     let join_response = app
         .clone()
         .oneshot(auth_request(
