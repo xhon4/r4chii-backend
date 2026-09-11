@@ -73,6 +73,13 @@ pub struct ChannelSummary {
     /// restriction, it inherits the parent's — see
     /// `DomainService::member_can_view_channel`).
     pub restricted: bool,
+    /// Every account in a `dm`/`group_dm`, oldest membership first. Always
+    /// empty for a server channel: `channel_member` is a DM-only concept
+    /// here, and a server channel's audience is its membership roster.
+    ///
+    /// A DM has no `name`, so this is the only thing a client can label one
+    /// with — including a DM someone else opened.
+    pub participant_ids: Vec<Uuid>,
 }
 
 /// Input to `DomainService::rename_channel` — `name` for `text`/`voice`,

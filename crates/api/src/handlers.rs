@@ -661,6 +661,13 @@ pub async fn create_dm(
     } else {
         StatusCode::OK
     };
+
+    // Only on a real create — a replay returns a channel both participants
+    // already have, and re-announcing it would be noise.
+    if created {
+        state.realtime.announce_dm_create(&channel).await;
+    }
+
     Ok((status, Json(channel.into())))
 }
 
@@ -688,6 +695,9 @@ pub async fn create_group_dm(
         .domain
         .create_group_dm(context.account_id, body.into())
         .await?;
+
+    state.realtime.announce_dm_create(&channel).await;
+
     Ok((StatusCode::CREATED, Json(channel.into())))
 }
 
@@ -709,6 +719,7 @@ pub async fn send_friend_request(
     } else {
         StatusCode::OK
     };
+
     Ok((status, Json(friendship.into())))
 }
 
@@ -736,6 +747,7 @@ pub async fn remove_friendship(
         .domain
         .remove_friendship(context.account_id, account_id)
         .await?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -757,6 +769,7 @@ pub async fn create_block(
     } else {
         StatusCode::OK
     };
+
     Ok((status, Json(block.into())))
 }
 

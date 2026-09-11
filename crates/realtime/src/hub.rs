@@ -364,7 +364,7 @@ impl Hub {
             .await;
     }
 
-    // ---- ADR-0017: channel lifecycle ----
+    // ---- channel lifecycle ----
 
     /// Broadcasts `channel.create` to every member that may view the channel.
     pub async fn publish_channel_create(
@@ -384,6 +384,27 @@ impl Hub {
         )
         .await;
         Ok(())
+    }
+
+    /// Announces a freshly-created `dm`/`group_dm` to its participants.
+    ///
+    /// Takes the roster explicitly rather than resolving one, unlike
+    /// `publish_channel_create`: that path resolves viewers with
+    /// `channel_viewer_account_ids`, which requires a `server_id`, and a
+    /// dm/group_dm has none by schema CHECK. A DM's audience is exactly its
+    /// `channel_member` rows, which the caller already holds — the same
+    /// explicit-recipients shape `announce_server_delete` uses.
+    ///
+    /// Infallible: there is no recipient lookup left to fail, and a dropped
+    /// frame must never fail the HTTP request that already created the row.
+    pub async fn announce_dm_create(&self, channel: &domain::ChannelSummary) {
+        self.send_to(
+            &channel.participant_ids,
+            &ServerEvent::ChannelCreate {
+                channel: ChannelPayload::from(channel),
+            },
+        )
+        .await;
     }
 
     /// Broadcasts `channel.update` (rename or reorder) to viewers of the

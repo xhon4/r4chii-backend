@@ -211,3 +211,98 @@ async fn create_dm_with_no_token_returns_401() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+// A DM has no `name`, so `participants` is what a client labels it with.
+// Bob never called POST /dms — his listing is the only place the roster can
+// come from.
+#[tokio::test]
+async fn listing_dms_exposes_the_roster_to_a_participant_who_did_not_create_it() {
+    let (app, mail, _container) = test_app().await;
+    let (alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    let dm_response = app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/dms",
+            &alice_token,
+            json!({ "account_id": bob_id }),
+        ))
+        .await
+        .expect("create dm request succeeds");
+    let dm = body_json(dm_response).await;
+    let channel_id = dm["id"].as_str().expect("channel id present").to_string();
+
+    let created_participants = dm["participants"]
+        .as_array()
+        .expect("the create response carries the roster");
+    assert_eq!(created_participants.len(), 2);
+
+    let list_response = app
+        .oneshot(auth_request(Method::GET, "/api/v1/dms", &bob_token))
+        .await
+        .expect("list dms request succeeds");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let body = body_json(list_response).await;
+
+    let listed = &body["items"][0];
+    assert_eq!(listed["id"], channel_id.as_str());
+    let participants = listed["participants"]
+        .as_array()
+        .expect("a listed dm carries its roster");
+    assert_eq!(participants.len(), 2);
+    assert!(participants.iter().any(|id| id == &alice_id));
+    assert!(participants.iter().any(|id| id == &bob_id));
+}
+
+// `participants` is a DM-only concept — a server channel must not grow one,
+// or the field turns into a roster leak on every channel listing.
+#[tokio::test]
+async fn a_server_channel_listing_carries_no_participants_field() {
+    let (app, mail, _container) = test_app().await;
+    let (_alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+
+    let server = body_json(
+        app.clone()
+            .oneshot(auth_json_request(
+                Method::POST,
+                "/api/v1/servers",
+                &alice_token,
+                json!({ "name": "Alice's Place" }),
+            ))
+            .await
+            .expect("create server request succeeds"),
+    )
+    .await;
+    let server_id = server["id"].as_str().expect("server id present").to_string();
+
+    app.clone()
+        .oneshot(auth_json_request(
+            Method::POST,
+            &format!("/api/v1/servers/{server_id}/channels"),
+            &alice_token,
+            json!({ "name": "general" }),
+        ))
+        .await
+        .expect("create channel request succeeds");
+
+    let body = body_json(
+        app.oneshot(auth_request(
+            Method::GET,
+            &format!("/api/v1/servers/{server_id}/channels"),
+            &alice_token,
+        ))
+        .await
+        .expect("list channels request succeeds"),
+    )
+    .await;
+
+    let items = body["items"].as_array().expect("items array");
+    assert!(!items.is_empty());
+    for channel in items {
+        assert!(channel["participants"].is_null());
+    }
+}

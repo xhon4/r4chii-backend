@@ -824,3 +824,78 @@ async fn revoking_a_channel_role_stops_message_and_voice_fan_out() {
         "a revoked member must receive neither voice.leave nor message.create"
     );
 }
+
+// A dm/group_dm has no `server_id`, so `publish_channel_create`'s viewer
+// lookup cannot resolve one. `announce_dm_create` takes the roster the
+// caller already holds — without it a DM someone else opens never reaches
+// that account until it reloads.
+#[tokio::test]
+async fn announce_dm_create_reaches_every_participant_and_nobody_else() {
+    let (hub, domain, auth, _container) = test_services().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+    let outsider = register(&auth, "outsider@example.com", "outsider").await;
+
+    let (_alice_handle, mut alice_rx) = hub.register(alice).await;
+    let (_bob_handle, mut bob_rx) = hub.register(bob).await;
+    let (_outsider_handle, mut outsider_rx) = hub.register(outsider).await;
+
+    let (channel, created) = domain
+        .create_dm(alice, bob)
+        .await
+        .expect("create_dm succeeds");
+    assert!(created);
+
+    hub.announce_dm_create(&channel).await;
+
+    // Bob never touched this channel — the event is the only way he learns
+    // it exists, and it must carry the roster he will label it with.
+    let bob_frame = recv_within(&mut bob_rx, Duration::from_secs(2))
+        .await
+        .expect("the other participant receives the event");
+    assert!(bob_frame.contains("\"type\":\"channel.create\""));
+    assert!(bob_frame.contains(&alice.to_string()));
+    assert!(bob_frame.contains(&bob.to_string()));
+
+    let alice_frame = recv_within(&mut alice_rx, Duration::from_secs(2))
+        .await
+        .expect("the creator receives the event too");
+    assert!(alice_frame.contains("\"type\":\"channel.create\""));
+
+    let outsider_frame = recv_within(&mut outsider_rx, Duration::from_millis(300)).await;
+    assert!(
+        outsider_frame.is_none(),
+        "a private conversation must never reach a non-participant"
+    );
+}
+
+#[tokio::test]
+async fn announce_dm_create_reaches_every_member_of_a_group_dm() {
+    let (hub, domain, auth, _container) = test_services().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+    let carol = register(&auth, "carol@example.com", "carol").await;
+
+    let (_bob_handle, mut bob_rx) = hub.register(bob).await;
+    let (_carol_handle, mut carol_rx) = hub.register(carol).await;
+
+    let channel = domain
+        .create_group_dm(
+            alice,
+            domain::CreateGroupDmInput {
+                account_ids: vec![bob, carol],
+            },
+        )
+        .await
+        .expect("create_group_dm succeeds");
+
+    hub.announce_dm_create(&channel).await;
+
+    for (name, rx) in [("bob", &mut bob_rx), ("carol", &mut carol_rx)] {
+        let frame = recv_within(rx, Duration::from_secs(2))
+            .await
+            .unwrap_or_else(|| panic!("{name} receives the event"));
+        assert!(frame.contains("\"type\":\"channel.create\""));
+        assert!(frame.contains("group_dm"));
+    }
+}

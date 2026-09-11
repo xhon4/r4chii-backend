@@ -845,6 +845,12 @@ pub struct ChannelResponse {
     /// its own; the client resolves a thread's effective restriction from
     /// its parent channel, same as everywhere else in this API).
     pub restricted: bool,
+    /// Every account in a `dm`/`group_dm`, oldest membership first. Omitted
+    /// for a server channel, which has no such roster.
+    ///
+    /// A DM carries no `name`, so this is what a client labels one with.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<Uuid>,
 }
 
 impl From<domain::ChannelSummary> for ChannelResponse {
@@ -861,6 +867,7 @@ impl From<domain::ChannelSummary> for ChannelResponse {
             title: channel.title,
             slug: channel.slug,
             restricted: channel.restricted,
+            participants: channel.participant_ids,
         }
     }
 }

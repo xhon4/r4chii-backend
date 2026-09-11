@@ -84,6 +84,11 @@ pub struct ChannelPayload {
     pub title: Option<String>,
     pub slug: Option<String>,
     pub restricted: bool,
+    /// Every account in a `dm`/`group_dm`; omitted for a server channel.
+    /// A DM has no `name`, so a client that receives this event needs the
+    /// roster to label the channel it is about to show.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<Uuid>,
 }
 
 impl From<&domain::ChannelSummary> for ChannelPayload {
@@ -100,6 +105,7 @@ impl From<&domain::ChannelSummary> for ChannelPayload {
             title: channel.title.clone(),
             slug: channel.slug.clone(),
             restricted: channel.restricted,
+            participants: channel.participant_ids.clone(),
         }
     }
 }
@@ -238,7 +244,7 @@ pub enum ServerEvent {
         account_id: Uuid,
         nickname: Option<String>,
     },
-    // ---- ADR-0017: channel lifecycle ----
+    // ---- channel lifecycle ----
     #[serde(rename = "channel.create")]
     ChannelCreate { channel: ChannelPayload },
     #[serde(rename = "channel.update")]
@@ -246,6 +252,8 @@ pub enum ServerEvent {
     #[serde(rename = "channel.delete")]
     ChannelDelete { server_id: Uuid, channel_id: Uuid },
 }
+
+
 
 /// Why a `member.leave` event fired — lets the client render "left" vs "was
 /// removed" vs "was banned" differently in the member list, without the

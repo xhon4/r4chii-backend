@@ -138,6 +138,21 @@ async fn m0_success_criteria_round_trip_works_end_to_end() {
     let dm_channel = body_json(dm_response).await;
     let dm_channel_id = dm_channel["id"].as_str().expect("dm channel id present").to_string();
 
+    // Creating a DM announces it to both participants: bob never called this
+    // endpoint, so the socket is the only way he learns the conversation
+    // exists. The payload carries the roster because a DM has no name.
+    for ws in [&mut alice_ws, &mut bob_ws] {
+        let event = next_ws_message(ws).await;
+        assert_eq!(event["type"], "channel.create");
+        assert_eq!(event["data"]["channel"]["id"], dm_channel_id.as_str());
+        let participants = event["data"]["channel"]["participants"]
+            .as_array()
+            .expect("a dm announces its participants");
+        assert_eq!(participants.len(), 2);
+        assert!(participants.iter().any(|id| id == &alice_id));
+        assert!(participants.iter().any(|id| id == &bob_id));
+    }
+
     let dm_send_response = app
         .clone()
         .oneshot(auth_json_request(

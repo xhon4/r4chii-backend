@@ -3,6 +3,20 @@ use sqlx::PgExecutor;
 
 use crate::channel::ChannelRow;
 
+/// A dm/group_dm row plus its roster. A DM carries no `name`, so its
+/// participants are the only thing a client can label it with — they are
+/// selected alongside the channel rather than in a follow-up query per row.
+///
+/// The correlated `ARRAY(..)` is an index-only scan on
+/// `channel_member (channel_id, account_id)`, and keeps `ChannelRow` usable
+/// unchanged by every other channel query.
+#[derive(sqlx::FromRow)]
+pub struct DmChannelRow {
+    #[sqlx(flatten)]
+    pub channel: ChannelRow,
+    pub participant_ids: Vec<Uuid>,
+}
+
 /// The 1:1 `dm` channel shared by exactly `account_a` and `account_b`, if one
 /// already exists.
 pub async fn find_existing_dm(
@@ -96,16 +110,33 @@ pub async fn insert_channel_member(
 pub async fn list_for_account(
     executor: impl PgExecutor<'_>,
     account_id: Uuid,
-) -> Result<Vec<ChannelRow>, sqlx::Error> {
-    sqlx::query_as::<_, ChannelRow>(
+) -> Result<Vec<DmChannelRow>, sqlx::Error> {
+    sqlx::query_as::<_, DmChannelRow>(
         "SELECT c.id, c.server_id, c.kind, c.name, c.created_at, c.visibility, \
-                c.parent_channel_id, c.root_message_id, c.title, c.slug, c.restricted \
+                c.parent_channel_id, c.root_message_id, c.title, c.slug, c.restricted, \
+                ARRAY( \
+                    SELECT m.account_id FROM channel_member m \
+                    WHERE m.channel_id = c.id ORDER BY m.added_at \
+                ) AS participant_ids \
          FROM channel c \
          JOIN channel_member cm ON cm.channel_id = c.id \
          WHERE cm.account_id = $1 AND c.kind IN ('dm', 'group_dm') \
          ORDER BY c.created_at ASC",
     )
     .bind(account_id)
+    .fetch_all(executor)
+    .await
+}
+
+/// Every `channel_member` of `channel_id`, oldest first.
+pub async fn channel_member_ids(
+    executor: impl PgExecutor<'_>,
+    channel_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT account_id FROM channel_member WHERE channel_id = $1 ORDER BY added_at",
+    )
+    .bind(channel_id)
     .fetch_all(executor)
     .await
 }

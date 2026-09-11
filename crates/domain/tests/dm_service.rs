@@ -1,5 +1,7 @@
 use app_core::Uuid;
-use domain::{CreateGroupDmInput, DomainError, SendMessageInput};
+use domain::{
+    CreateChannelInput, CreateGroupDmInput, CreateServerInput, DomainError, SendMessageInput,
+};
 
 mod common;
 use common::*;
@@ -278,4 +280,147 @@ async fn list_dms_returns_only_the_callers_dm_and_group_dm_channels() {
         .map(|c| c.id)
         .collect();
     assert_eq!(carol_dms, vec![group.id]);
+}
+
+fn sorted(mut ids: Vec<Uuid>) -> Vec<Uuid> {
+    ids.sort();
+    ids
+}
+
+// A DM carries no `name`, so the only way a client can label one is from its
+// participants. Listing must therefore expose them to a member who never
+// created the channel — the case a client cannot reconstruct on its own.
+#[tokio::test]
+async fn list_dms_exposes_every_participant_of_each_channel() {
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+    let carol = register(&auth, "carol@example.com", "carol").await;
+
+    let (dm, _) = domain
+        .create_dm(alice, bob)
+        .await
+        .expect("create_dm succeeds");
+    let group = domain
+        .create_group_dm(
+            alice,
+            CreateGroupDmInput {
+                account_ids: vec![bob, carol],
+            },
+        )
+        .await
+        .expect("create_group_dm succeeds");
+
+    let listed = domain.list_dms(bob).await.expect("list_dms succeeds");
+
+    let listed_dm = listed
+        .iter()
+        .find(|channel| channel.id == dm.id)
+        .expect("the 1:1 dm is listed");
+    assert_eq!(
+        sorted(listed_dm.participant_ids.clone()),
+        sorted(vec![alice, bob])
+    );
+
+    let listed_group = listed
+        .iter()
+        .find(|channel| channel.id == group.id)
+        .expect("the group dm is listed");
+    assert_eq!(
+        sorted(listed_group.participant_ids.clone()),
+        sorted(vec![alice, bob, carol])
+    );
+}
+
+// The creation paths feed both the HTTP response and the realtime announce,
+// so they must carry participants too — including the idempotent replay,
+// which returns a pre-existing row rather than the one it just inserted.
+#[tokio::test]
+async fn create_dm_returns_participants_on_both_create_and_replay() {
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+
+    let (created, was_created) = domain
+        .create_dm(alice, bob)
+        .await
+        .expect("create_dm succeeds");
+    assert!(was_created);
+    assert_eq!(
+        sorted(created.participant_ids.clone()),
+        sorted(vec![alice, bob])
+    );
+
+    let (replayed, was_created) = domain
+        .create_dm(bob, alice)
+        .await
+        .expect("create_dm succeeds");
+    assert!(!was_created);
+    assert_eq!(
+        sorted(replayed.participant_ids.clone()),
+        sorted(vec![alice, bob])
+    );
+}
+
+#[tokio::test]
+async fn create_group_dm_returns_the_creator_and_every_participant() {
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+    let carol = register(&auth, "carol@example.com", "carol").await;
+
+    let group = domain
+        .create_group_dm(
+            alice,
+            CreateGroupDmInput {
+                account_ids: vec![bob, carol],
+            },
+        )
+        .await
+        .expect("create_group_dm succeeds");
+
+    assert_eq!(
+        sorted(group.participant_ids.clone()),
+        sorted(vec![alice, bob, carol])
+    );
+}
+
+// A server channel has no participant list — `channel_member` is a DM-only
+// concept here. The field must stay empty rather than leak a roster.
+#[tokio::test]
+async fn server_channels_carry_no_participant_ids() {
+    let (domain, auth, _pool, _container) = test_services_with_pool().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let server = domain
+        .create_server(
+            alice,
+            CreateServerInput {
+                name: "a server".to_string(),
+                visibility: None,
+            },
+        )
+        .await
+        .expect("create_server succeeds");
+
+    domain
+        .create_channel(
+            alice,
+            server.id,
+            CreateChannelInput {
+                name: "general".to_string(),
+                kind: None,
+            },
+        )
+        .await
+        .expect("create_channel succeeds");
+
+    let channels = domain
+        .list_channels(alice, server.id)
+        .await
+        .expect("list_channels succeeds");
+
+    assert!(!channels.is_empty());
+    for channel in channels {
+        assert!(channel.participant_ids.is_empty());
+    }
 }

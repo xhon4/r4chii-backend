@@ -186,6 +186,16 @@ impl From<db::channel::ChannelRow> for ChannelSummary {
             title: row.title,
             slug: row.slug,
             restricted: row.restricted,
+            participant_ids: Vec::new(),
+        }
+    }
+}
+
+impl From<db::dm::DmChannelRow> for ChannelSummary {
+    fn from(row: db::dm::DmChannelRow) -> Self {
+        Self {
+            participant_ids: row.participant_ids,
+            ..Self::from(row.channel)
         }
     }
 }
@@ -1507,8 +1517,15 @@ impl DomainService {
         let existing = db::dm::find_existing_dm(&mut *tx, account_id, other_account_id).await?;
 
         if let Some(channel) = existing {
+            let participant_ids = db::dm::channel_member_ids(&mut *tx, channel.id).await?;
             tx.commit().await?;
-            return Ok((channel.into(), false));
+            return Ok((
+                ChannelSummary {
+                    participant_ids,
+                    ..channel.into()
+                },
+                false,
+            ));
         }
 
         let channel_id = new_id();
@@ -1526,7 +1543,13 @@ impl DomainService {
 
         tx.commit().await?;
 
-        Ok((channel.into(), true))
+        Ok((
+            ChannelSummary {
+                participant_ids: vec![account_id, other_account_id],
+                ..channel.into()
+            },
+            true,
+        ))
     }
 
     /// Creates a new `group_dm` channel with `account_id` (the caller) plus
@@ -1563,13 +1586,17 @@ impl DomainService {
         // Creator + every validated participant, one row each — `input`'s
         // ids are already deduped and creator-filtered by
         // `validate_group_dm_participants`.
-        for member_id in std::iter::once(account_id).chain(participants) {
-            db::dm::insert_channel_member(&mut *tx, new_id(), channel_id, member_id).await?;
+        let participant_ids: Vec<Uuid> = std::iter::once(account_id).chain(participants).collect();
+        for member_id in &participant_ids {
+            db::dm::insert_channel_member(&mut *tx, new_id(), channel_id, *member_id).await?;
         }
 
         tx.commit().await?;
 
-        Ok(channel.into())
+        Ok(ChannelSummary {
+            participant_ids,
+            ..channel.into()
+        })
     }
 
     /// Every dm/group_dm channel `account_id` is a member of (ROADMAP slice
