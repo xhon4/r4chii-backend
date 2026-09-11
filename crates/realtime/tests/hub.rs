@@ -899,3 +899,121 @@ async fn announce_dm_create_reaches_every_member_of_a_group_dm() {
         assert!(frame.contains("group_dm"));
     }
 }
+
+// A friendship row is stored order-agnostic and projected per viewer:
+// `account_id` always names the OTHER party. Both sides therefore get the
+// same row with that one field flipped — without this event, accepting a
+// request is invisible to the person who sent it until they reload.
+#[tokio::test]
+async fn publish_friendship_update_gives_each_side_its_own_projection() {
+    let (hub, domain, auth, _container) = test_services().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+    let outsider = register(&auth, "outsider@example.com", "outsider").await;
+
+    let (_alice_handle, mut alice_rx) = hub.register(alice).await;
+    let (_bob_handle, mut bob_rx) = hub.register(bob).await;
+    let (_outsider_handle, mut outsider_rx) = hub.register(outsider).await;
+
+    let (friendship, changed) = domain
+        .send_friend_request(alice, bob)
+        .await
+        .expect("send_friend_request succeeds");
+    assert!(changed);
+
+    hub.publish_friendship_update(&friendship, alice).await;
+
+    let bob_frame = recv_within(&mut bob_rx, Duration::from_secs(2))
+        .await
+        .expect("the recipient of the request is told about it");
+    let bob_event: serde_json::Value =
+        serde_json::from_str(&bob_frame).expect("a json frame");
+    assert_eq!(bob_event["type"], "friendship.update");
+    // Bob's view names alice, not himself.
+    assert_eq!(bob_event["data"]["friendship"]["account_id"], alice.to_string());
+    assert_eq!(bob_event["data"]["friendship"]["status"], "pending");
+    assert_eq!(
+        bob_event["data"]["friendship"]["requested_by"],
+        alice.to_string()
+    );
+
+    let alice_frame = recv_within(&mut alice_rx, Duration::from_secs(2))
+        .await
+        .expect("the sender's other tabs are told too");
+    let alice_event: serde_json::Value =
+        serde_json::from_str(&alice_frame).expect("a json frame");
+    assert_eq!(alice_event["type"], "friendship.update");
+    // Alice's view names bob — the same row, flipped.
+    assert_eq!(alice_event["data"]["friendship"]["account_id"], bob.to_string());
+
+    let outsider_frame = recv_within(&mut outsider_rx, Duration::from_millis(300)).await;
+    assert!(
+        outsider_frame.is_none(),
+        "a friendship is private to its two parties"
+    );
+}
+
+// Accepting is the same endpoint as requesting, and is the leg that was
+// reported broken: alice must learn that bob accepted without reloading.
+#[tokio::test]
+async fn accepting_a_request_reaches_the_account_that_sent_it() {
+    let (hub, domain, auth, _container) = test_services().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+
+    domain
+        .send_friend_request(alice, bob)
+        .await
+        .expect("send_friend_request succeeds");
+
+    let (_alice_handle, mut alice_rx) = hub.register(alice).await;
+
+    let (accepted, changed) = domain
+        .send_friend_request(bob, alice)
+        .await
+        .expect("accepting succeeds");
+    assert!(changed);
+    assert_eq!(accepted.status, "accepted");
+
+    hub.publish_friendship_update(&accepted, bob).await;
+
+    let frame = recv_within(&mut alice_rx, Duration::from_secs(2))
+        .await
+        .expect("the original requester is told the request was accepted");
+    let event: serde_json::Value = serde_json::from_str(&frame).expect("a json frame");
+    assert_eq!(event["type"], "friendship.update");
+    assert_eq!(event["data"]["friendship"]["status"], "accepted");
+    assert_eq!(event["data"]["friendship"]["account_id"], bob.to_string());
+}
+
+#[tokio::test]
+async fn publish_friendship_remove_reaches_both_parties_and_nobody_else() {
+    let (hub, _domain, auth, _container) = test_services().await;
+    let alice = register(&auth, "alice@example.com", "alice").await;
+    let bob = register(&auth, "bob@example.com", "bob").await;
+    let outsider = register(&auth, "outsider@example.com", "outsider").await;
+
+    let (_alice_handle, mut alice_rx) = hub.register(alice).await;
+    let (_bob_handle, mut bob_rx) = hub.register(bob).await;
+    let (_outsider_handle, mut outsider_rx) = hub.register(outsider).await;
+
+    hub.publish_friendship_remove(alice, bob).await;
+
+    let bob_frame = recv_within(&mut bob_rx, Duration::from_secs(2))
+        .await
+        .expect("the removed party is told");
+    let bob_event: serde_json::Value = serde_json::from_str(&bob_frame).expect("a json frame");
+    assert_eq!(bob_event["type"], "friendship.remove");
+    assert_eq!(bob_event["data"]["account_id"], alice.to_string());
+
+    let alice_frame = recv_within(&mut alice_rx, Duration::from_secs(2))
+        .await
+        .expect("the actor's other tabs are told");
+    let alice_event: serde_json::Value =
+        serde_json::from_str(&alice_frame).expect("a json frame");
+    assert_eq!(alice_event["type"], "friendship.remove");
+    assert_eq!(alice_event["data"]["account_id"], bob.to_string());
+
+    let outsider_frame = recv_within(&mut outsider_rx, Duration::from_millis(300)).await;
+    assert!(outsider_frame.is_none());
+}

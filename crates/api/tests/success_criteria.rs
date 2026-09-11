@@ -99,6 +99,14 @@ async fn m0_success_criteria_round_trip_works_end_to_end() {
     let pending = body_json(request_response).await;
     assert_eq!(pending["status"], "pending");
 
+    // Both sides hear about the request live, each naming the OTHER party.
+    for (ws, other) in [(&mut alice_ws, &bob_id), (&mut bob_ws, &alice_id)] {
+        let event = next_ws_message(ws).await;
+        assert_eq!(event["type"], "friendship.update");
+        assert_eq!(event["data"]["friendship"]["status"], "pending");
+        assert_eq!(event["data"]["friendship"]["account_id"], other.as_str());
+    }
+
     let accept_response = app
         .clone()
         .oneshot(auth_json_request(
@@ -112,6 +120,15 @@ async fn m0_success_criteria_round_trip_works_end_to_end() {
     assert_eq!(accept_response.status(), StatusCode::CREATED);
     let accepted = body_json(accept_response).await;
     assert_eq!(accepted["status"], "accepted");
+
+    // The leg that was reported broken: alice issued no request here, and
+    // still learns the friendship was accepted without reloading.
+    for (ws, other) in [(&mut alice_ws, &bob_id), (&mut bob_ws, &alice_id)] {
+        let event = next_ws_message(ws).await;
+        assert_eq!(event["type"], "friendship.update");
+        assert_eq!(event["data"]["friendship"]["status"], "accepted");
+        assert_eq!(event["data"]["friendship"]["account_id"], other.as_str());
+    }
 
     let alice_friends = body_json(
         app.clone()
@@ -323,6 +340,15 @@ async fn m0_success_criteria_round_trip_works_end_to_end() {
         .await
         .expect("block succeeds");
     assert_eq!(block_response.status(), StatusCode::CREATED);
+
+    // Blocking also deletes the friendship row, so both sides are told the
+    // friendship is gone — the same frame an ordinary unfriend sends, which
+    // is what keeps a block indistinguishable from one.
+    for (ws, other) in [(&mut alice_ws, &bob_id), (&mut bob_ws, &alice_id)] {
+        let event = next_ws_message(ws).await;
+        assert_eq!(event["type"], "friendship.remove");
+        assert_eq!(event["data"]["account_id"], other.as_str());
+    }
 
     let blocked_send = app
         .clone()

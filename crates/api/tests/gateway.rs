@@ -502,3 +502,122 @@ async fn ready_omits_a_restricted_channel_after_its_only_role_is_revoked() {
         "the revoked role must remove the restricted channel from ready"
     );
 }
+
+/// The reported bug: bob accepts alice's request and alice's screen keeps
+/// showing it as pending until she reloads. This drives the real HTTP
+/// handlers, so it covers the wiring the hub's own tests cannot.
+#[tokio::test]
+async fn accepting_a_friend_request_reaches_the_requester_over_the_socket() {
+    let (app, mail, _container) = test_app().await;
+    let (alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    let request_app = app.clone();
+    let addr = spawn_server(app).await;
+    let uri: http::Uri = format!("ws://{addr}/api/v1/gateway")
+        .parse()
+        .expect("uri parses");
+    let builder = ClientRequestBuilder::new(uri)
+        .with_header("Cookie", format!("r4chii_session={alice_token}"));
+
+    let (mut ws, _response) = tokio_tungstenite::connect_async(builder)
+        .await
+        .expect("handshake succeeds");
+    let _ready = next_ws_message(&mut ws).await;
+
+    // Alice asks first, from her own HTTP request rather than her socket.
+    request_app
+        .clone()
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/friends",
+            &alice_token,
+            json!({ "account_id": bob_id }),
+        ))
+        .await
+        .expect("friend request succeeds");
+
+    let pending = next_ws_message(&mut ws).await;
+    let pending: Value = match pending {
+        WsMessage::Text(text) => serde_json::from_str(text.as_str()).expect("valid JSON"),
+        other => panic!("expected a text frame, got {other:?}"),
+    };
+    assert_eq!(pending["type"], "friendship.update");
+    assert_eq!(pending["data"]["friendship"]["status"], "pending");
+    // Alice's own projection names bob, never herself.
+    assert_eq!(pending["data"]["friendship"]["account_id"], bob_id);
+
+    // Bob accepts. Alice never issued this request and must still be told.
+    request_app
+        .oneshot(auth_json_request(
+            Method::POST,
+            "/api/v1/friends",
+            &bob_token,
+            json!({ "account_id": alice_id }),
+        ))
+        .await
+        .expect("friend accept succeeds");
+
+    let accepted = next_ws_message(&mut ws).await;
+    let accepted: Value = match accepted {
+        WsMessage::Text(text) => serde_json::from_str(text.as_str()).expect("valid JSON"),
+        other => panic!("expected a text frame, got {other:?}"),
+    };
+    assert_eq!(accepted["type"], "friendship.update");
+    assert_eq!(accepted["data"]["friendship"]["status"], "accepted");
+    assert_eq!(accepted["data"]["friendship"]["account_id"], bob_id);
+}
+
+/// Unfriending is the same row deletion as declining or cancelling, so it is
+/// the same frame — and the other side must not keep a friend who is gone.
+#[tokio::test]
+async fn unfriending_reaches_the_other_party_over_the_socket() {
+    let (app, mail, _container) = test_app().await;
+    let (alice_id, alice_token) =
+        register_and_login(&app, &mail, "alice@example.com", "alice").await;
+    let (bob_id, bob_token) = register_and_login(&app, &mail, "bob@example.com", "bob").await;
+
+    let request_app = app.clone();
+    for (token, other) in [(&alice_token, &bob_id), (&bob_token, &alice_id)] {
+        request_app
+            .clone()
+            .oneshot(auth_json_request(
+                Method::POST,
+                "/api/v1/friends",
+                token,
+                json!({ "account_id": other }),
+            ))
+            .await
+            .expect("friendship is established");
+    }
+
+    let addr = spawn_server(app).await;
+    let uri: http::Uri = format!("ws://{addr}/api/v1/gateway")
+        .parse()
+        .expect("uri parses");
+    let builder = ClientRequestBuilder::new(uri)
+        .with_header("Cookie", format!("r4chii_session={alice_token}"));
+
+    let (mut ws, _response) = tokio_tungstenite::connect_async(builder)
+        .await
+        .expect("handshake succeeds");
+    let _ready = next_ws_message(&mut ws).await;
+
+    request_app
+        .oneshot(auth_request(
+            Method::DELETE,
+            &format!("/api/v1/friends/{alice_id}"),
+            &bob_token,
+        ))
+        .await
+        .expect("unfriend succeeds");
+
+    let removed = next_ws_message(&mut ws).await;
+    let removed: Value = match removed {
+        WsMessage::Text(text) => serde_json::from_str(text.as_str()).expect("valid JSON"),
+        other => panic!("expected a text frame, got {other:?}"),
+    };
+    assert_eq!(removed["type"], "friendship.remove");
+    assert_eq!(removed["data"]["account_id"], bob_id);
+}

@@ -251,9 +251,47 @@ pub enum ServerEvent {
     ChannelUpdate { channel: ChannelPayload },
     #[serde(rename = "channel.delete")]
     ChannelDelete { server_id: Uuid, channel_id: Uuid },
+    // ---- friendships ----
+    /// A friendship row was created, or moved from `pending` to `accepted`.
+    /// Point-to-point: a friendship concerns exactly two accounts, and
+    /// carries no server or channel to fan out over.
+    #[serde(rename = "friendship.update")]
+    FriendshipUpdate { friendship: FriendshipPayload },
+    /// The friendship with `account_id` is gone — a declined or cancelled
+    /// request and an unfriend are the same row deletion, so they are the
+    /// same event rather than three.
+    #[serde(rename = "friendship.remove")]
+    FriendshipRemove { account_id: Uuid },
 }
 
+/// A friendship as ONE of its two parties sees it: `account_id` names the
+/// other party, never the recipient. The stored row is order-agnostic, so
+/// the same row projects to a different payload for each side — see
+/// `Hub::publish_friendship_update`, which sends both.
+#[derive(Debug, Clone, Serialize)]
+pub struct FriendshipPayload {
+    pub id: Uuid,
+    /// The OTHER party, from the recipient's point of view.
+    pub account_id: Uuid,
+    /// `pending` | `accepted`.
+    pub status: String,
+    pub requested_by: Uuid,
+    pub created_at: DateTime<Utc>,
+}
 
+impl FriendshipPayload {
+    /// `friendship` as `other_account_id`'s counterpart sees it — every field
+    /// but `account_id` is viewer-independent.
+    pub fn projected(friendship: &domain::FriendshipSummary, other_account_id: Uuid) -> Self {
+        Self {
+            id: friendship.id,
+            account_id: other_account_id,
+            status: friendship.status.clone(),
+            requested_by: friendship.requested_by,
+            created_at: friendship.created_at,
+        }
+    }
+}
 
 /// Why a `member.leave` event fired — lets the client render "left" vs "was
 /// removed" vs "was banned" differently in the member list, without the

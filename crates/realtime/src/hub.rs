@@ -12,7 +12,8 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::error::RealtimeError;
 use crate::event::{
-    ChannelPayload, DeclaredStatus, MemberLeaveReason, MessagePayload, PresenceStatus, RolePayload,
+    ChannelPayload, DeclaredStatus, FriendshipPayload, MemberLeaveReason, MessagePayload,
+    PresenceStatus, RolePayload,
     ServerEvent,
 };
 
@@ -787,6 +788,66 @@ impl Hub {
         self.send_to(
             &account_ids,
             &ServerEvent::PresenceStatusUpdate { account_id, status },
+        )
+        .await;
+    }
+
+    // ---- friendships ----
+
+    /// Tells both parties that their friendship row was created or accepted.
+    ///
+    /// `domain::FriendshipSummary` is projected for whoever asked: its
+    /// `account_id` is the OTHER party. The two recipients therefore need the
+    /// same row with that one field flipped, which is all `projected` does.
+    ///
+    /// The actor is NOT excluded. Their own tabs hold the same stale list as
+    /// the other party's, and only the tab that issued the request sees the
+    /// HTTP response — the same no-sender-exclusion rule `message.create`
+    /// fans out under.
+    ///
+    /// Infallible: the row is already committed, and a dropped frame must
+    /// never fail the request that wrote it. The next list reconciles.
+    pub async fn publish_friendship_update(
+        &self,
+        friendship: &domain::FriendshipSummary,
+        actor_id: Uuid,
+    ) {
+        let other_id = friendship.account_id;
+
+        self.send_to_account(
+            other_id,
+            &ServerEvent::FriendshipUpdate {
+                friendship: FriendshipPayload::projected(friendship, actor_id),
+            },
+        )
+        .await;
+        self.send_to_account(
+            actor_id,
+            &ServerEvent::FriendshipUpdate {
+                friendship: FriendshipPayload::projected(friendship, other_id),
+            },
+        )
+        .await;
+    }
+
+    /// Tells both parties the friendship row between them is gone — a
+    /// declined request, a cancelled one and an unfriend are one deletion.
+    ///
+    /// Takes both ids explicitly: by the time this is called the row is
+    /// deleted, so there is nothing left to project a summary from.
+    pub async fn publish_friendship_remove(&self, actor_id: Uuid, target_id: Uuid) {
+        self.send_to_account(
+            target_id,
+            &ServerEvent::FriendshipRemove {
+                account_id: actor_id,
+            },
+        )
+        .await;
+        self.send_to_account(
+            actor_id,
+            &ServerEvent::FriendshipRemove {
+                account_id: target_id,
+            },
         )
         .await;
     }

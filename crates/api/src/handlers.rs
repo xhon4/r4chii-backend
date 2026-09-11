@@ -720,6 +720,16 @@ pub async fn send_friend_request(
         StatusCode::OK
     };
 
+    // Only when the row actually moved: re-sending a request that is already
+    // pending changes nothing, and announcing it would make the other side's
+    // client refetch for no reason.
+    if changed {
+        state
+            .realtime
+            .publish_friendship_update(&friendship, context.account_id)
+            .await;
+    }
+
     Ok((status, Json(friendship.into())))
 }
 
@@ -748,6 +758,11 @@ pub async fn remove_friendship(
         .remove_friendship(context.account_id, account_id)
         .await?;
 
+    state
+        .realtime
+        .publish_friendship_remove(context.account_id, account_id)
+        .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -769,6 +784,14 @@ pub async fn create_block(
     } else {
         StatusCode::OK
     };
+
+    // Blocking also deletes any friendship row between the two, so the other
+    // side holds a friend that no longer exists. This is the same frame an
+    // unfriend sends, which is what keeps a block indistinguishable from one.
+    state
+        .realtime
+        .publish_friendship_remove(context.account_id, body.account_id)
+        .await;
 
     Ok((status, Json(block.into())))
 }
